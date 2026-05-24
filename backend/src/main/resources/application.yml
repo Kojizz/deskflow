@@ -1,0 +1,50 @@
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/deskflow}
+    username: ${DATABASE_USER:deskflow}
+    password: ${DATABASE_PASSWORD:deskflow}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        auto-startup: ${app.worker-enabled:false}
+        default-requeue-rejected: false
+        prefetch: 4
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+server:
+  error:
+    include-message: never
+  tomcat:
+    max-http-form-post-size: 256KB
+app:
+  role: ${APP_ROLE:api}
+  encryption-key: ${APP_ENCRYPTION_KEY:}
+  worker-enabled: false
+  cookie-secure: ${COOKIE_SECURE:false}
+management:
+  endpoint:
+    health:
+      show-details: never
+  health:
+    mail:
+      enabled: false
+---
+spring:
+  config:
+    activate:
+      on-profile: worker
+app:
+  worker-enabled: true

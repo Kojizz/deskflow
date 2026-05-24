@@ -1,0 +1,26 @@
+# Native Windows / IntelliJ mode. Secrets stay in the ignored project .env.
+# Supports launching with either the project root or backend as working directory.
+spring:
+  config:
+    import:
+      - "optional:file:./.env[.properties]"
+      - "optional:file:../.env[.properties]"
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:55432/deskflow
+    username: deskflow
+    password: ${POSTGRES_PASSWORD}
+  rabbitmq:
+    listener:
+      simple:
+        auto-startup: false
+server:
+  address: 127.0.0.1
+  port: 18080
+app:
+  role: api
+  worker-enabled: true
+  publisher-enabled: false
+management:
+  health:
+    rabbit:
+      enabled: false
