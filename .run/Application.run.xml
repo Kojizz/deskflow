@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Application" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot" nameIsGenerated="true">
+    <option name="ACTIVE_PROFILES" value="local" />
+    <module name="deskflow" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="dev.deskflow.Application" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="DeskFlow Infrastructure" run_configuration_type="ShConfigurationType" />
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
