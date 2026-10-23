@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Service;
 import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.util.*;
 
@@ -63,7 +62,9 @@ class ProjectManager {
                 throw new IllegalArgumentException();
             }
             for (Path segment : requested) {
-                if (segment.toString().equals("..") || segment.toString().equals(".git")) {
+                String name = segment.toString();
+                if (name.equals("..") || name.contains(":")
+                    || name.replaceAll("[ .]+$", "").equalsIgnoreCase(".git")) {
                     throw new IllegalArgumentException();
                 }
             }
@@ -91,14 +92,35 @@ class ProjectManager {
                 String pointer = Files.readString(marker).trim();
                 if (!pointer.startsWith("gitdir: ")) { throw new IllegalArgumentException(); }
                 Path metadata = workspace.resolve(pointer.substring(8)).normalize().toRealPath();
-                Path expected = Path.of(project.get("root_path").toString()).resolve(".git/worktrees").resolve(instance.get("id").toString()).toRealPath();
-                if (!metadata.equals(expected) || !Path.of(Files.readString(metadata.resolve("gitdir")).trim()).equals(marker)) {
+                Path common = root(project.get("root_path").toString()).resolve(".git").toRealPath();
+                Path expected = common.resolve("worktrees").resolve(instance.get("id").toString()).toRealPath();
+                if (!expected.startsWith(common) || !metadata.equals(expected)
+                    || !Path.of(Files.readString(metadata.resolve("gitdir")).trim()).equals(marker)) {
                     throw new IllegalArgumentException();
                 }
             }
             return workspace;
         } catch (Exception ignored) {
             throw new IllegalArgumentException("Instance workspace is unavailable");
+        }
+    }
+    Path storage() {
+        Path directory = Path.of(env.getProperty("app.projects.workspace-root", ".local/project-instances")).toAbsolutePath().normalize();
+        try {
+            Path ancestor = directory;
+            while (!Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS)) {
+                ancestor = ancestor.getParent();
+            }
+            if (!ancestor.toRealPath().equals(ancestor)) {
+                throw new IllegalArgumentException();
+            }
+            Files.createDirectories(directory);
+            if (!directory.toRealPath().equals(directory)) {
+                throw new IllegalArgumentException();
+            }
+            return directory;
+        } catch (Exception error) {
+            throw new IllegalArgumentException("Instance storage must use a canonical directory");
         }
     }
     String gitExecutable() {
@@ -180,12 +202,12 @@ class ProjectManager {
                 throw new IllegalArgumentException("Project is archived");
             }
             int quota = env.getProperty("app.projects.max-instances", Integer.class, 8);
-            int count = store.db.queryForObject("select count(*) from project_instances where owner_id=? and status<>'ARCHIVED'", Integer.class, owner);
+            int count = store.db.queryForObject("select count(*) from project_instances where owner_id=? and deleted_at is null", Integer.class, owner);
             if (count >= quota) {
                 throw new IllegalArgumentException("Instance quota exceeded");
             }
             long used = 0;
-            for (var instance : store.rows("select * from project_instances where owner_id=?", owner)) {
+            for (var instance : store.rows("select * from project_instances where owner_id=? and deleted_at is null", owner)) {
                 if (Files.exists(Path.of(instance.get("workspace_path").toString()))) {
                     used += size(path(instance));
                 }
@@ -196,29 +218,33 @@ class ProjectManager {
             Path source = root(p.get("root_path").toString());
             Map<String,Object> base = null;
             if (baseId != null) {
-                base = Store.clean(store.db.queryForMap("select * from project_instances where id=? and owner_id=? for update",baseId,owner));
+                base = Store.clean(store.db.queryForMap("select * from project_instances where id=? and owner_id=? and deleted_at is null for update",baseId,owner));
                 if (!base.get("project_id").equals(project) || !base.get("status").equals("READY") || base.get("lease_token") != null) {
                     throw new IllegalArgumentException("Base instance is unavailable");
                 }
                 source = path(base);
             }
             UUID id = UUID.randomUUID();
-            Path target = Path.of(env.getProperty("app.projects.workspace-root", ".local/project-instances")).toAbsolutePath().normalize().resolve(id.toString());
-            if (target.startsWith(source) || source.startsWith(target)) {
+            Path target = storage().resolve(id.toString());
+            Path original = root(p.get("root_path").toString());
+            if (target.startsWith(source) || source.startsWith(target) || target.startsWith(original)) {
                 throw new IllegalArgumentException("Instance storage must be outside the source tree");
             }
             String revision = p.get("kind").equals("git") ? ref(source, body.path("ref").asText("HEAD")) : null;
             try {
                 Files.createDirectories(target.getParent());
                 if (revision != null) {
-                    git(source, "worktree", "add", "--detach", target.toString(), revision);
+                    git(root(p.get("root_path").toString()), "worktree", "add", "--detach", target.toString(), revision);
                     if (base != null) {
                         try (var paths = Files.list(target)) {
-                        for (Path entry : paths.toList()) {
-                            if (!entry.getFileName().toString().equals(".git")) { deleteTree(entry); }
+                            for (Path entry : paths.toList()) {
+                                if (!entry.getFileName().toString().equals(".git")) {
+                                    deleteTree(entry);
+                                }
+                            }
                         }
-                    }
-                    copy(source, target, true);
+                        copy(source, target, true);
+                        copyIndex(p, baseId, id);
                     }
                 } else {
                     copy(source, target, false);
@@ -229,7 +255,7 @@ class ProjectManager {
                 return view(store.instance(owner,id));
             } catch (Exception error) {
                 if (revision != null) {
-                    try { git(source,"worktree","remove","--force",target.toString()); } catch (Exception ignored) { }
+                    try { git(root(p.get("root_path").toString()),"worktree","remove","--force",target.toString()); } catch (Exception ignored) { }
                 } else {
                     deleteTree(target);
                 }
@@ -238,72 +264,112 @@ class ProjectManager {
         });
     }
     long size(Path source) {
-        long[] bytes = {0};
-        walk(source, (file, attrs) -> {
-            bytes[0] += attrs.size();
-            if (bytes[0] > cap()) {
-                throw new IllegalArgumentException("Instance size cap exceeded");
-            }
-        });
-        return bytes[0];
-    }
-    interface FileAction { void accept(Path file, BasicFileAttributes attrs) throws Exception; }
-    void walk(Path source, FileAction action) {
-        try {
-            var files = new ArrayList<Path>();
-            Files.walkFileTree(source, new SimpleFileVisitor<Path>() {
-                int visited;
-                @Override public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attrs) throws java.io.IOException {
-                    if (directory.getFileName().toString().equals(".git")) { return FileVisitResult.SKIP_SUBTREE; }
-                    if (++visited > 10000 || !directory.toRealPath().startsWith(source.toRealPath())) {
-                        throw new java.io.IOException("Unsafe tree");
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-                @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws java.io.IOException {
-                    if (file.getFileName().toString().equals(".git")) { return FileVisitResult.CONTINUE; }
-                    if (++visited > 10000 || attrs.isSymbolicLink() || !attrs.isRegularFile() || !file.toRealPath().startsWith(source.toRealPath())) {
-                        throw new java.io.IOException("Unsafe file");
-                    }
-                    files.add(file);
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-            files.sort(Comparator.naturalOrder());
-            for (Path file : files) {
-                action.accept(file,Files.readAttributes(file,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS));
-            }
-        } catch (Exception error) {
-            throw new IllegalArgumentException("Cannot safely inspect the instance tree");
-        }
+        return ProjectFiles.inspect(source, cap()).stream().mapToLong(ProjectFiles.Entry::bytes).sum();
     }
     void copy(Path source, Path target, boolean overlay) {
-        size(source);
+        ProjectFiles.copy(source, target, cap());
+    }
+    void copyIndex(Map<String,Object> project, UUID source, UUID target) {
         try {
-            Files.createDirectories(target);
-            walk(source, (file, attrs) -> {
-                Path destination = target.resolve(source.relativize(file));
-                Files.createDirectories(destination.getParent());
-                Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-            });
+            Path common = root(project.get("root_path").toString()).resolve(".git").toRealPath();
+            Path from = common.resolve("worktrees").resolve(source.toString()).resolve("index").toRealPath();
+            Path to = common.resolve("worktrees").resolve(target.toString()).resolve("index").toAbsolutePath();
+            if (!from.startsWith(common) || !to.getParent().toRealPath().startsWith(common)
+                || !Files.isRegularFile(from, LinkOption.NOFOLLOW_LINKS) || Files.size(from) > cap()) {
+                throw new IllegalArgumentException();
+            }
+            Files.copy(from, to, StandardCopyOption.REPLACE_EXISTING);
         } catch (Exception error) {
-            throw new IllegalArgumentException("Snapshot copy failed");
+            throw new IllegalArgumentException("Cannot preserve the fork's staged changes");
         }
     }
     static void deleteTree(Path target) {
         try {
-            if (!Files.exists(target)) { return; }
-            try (var paths = Files.walk(target)) {
-                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                    if (!Files.isSymbolicLink(path) && !path.toRealPath().startsWith(target.toRealPath())) {
-                        throw new IllegalArgumentException("Cleanup path escapes the instance");
-                    }
-                    path.toFile().setWritable(true);
-                    Files.delete(path);
-                }
+            Path absolute = target.toAbsolutePath().normalize();
+            if (!Files.exists(absolute, LinkOption.NOFOLLOW_LINKS)) {
+                return;
             }
+            if (Files.isSymbolicLink(absolute)) {
+                Files.delete(absolute);
+                return;
+            }
+            Path boundary = absolute.toRealPath();
+            if (!boundary.equals(absolute) || absolute.getNameCount() < 2) {
+                throw new IllegalArgumentException();
+            }
+            Files.walkFileTree(absolute, new SimpleFileVisitor<Path>() {
+                void check(Path path) throws java.io.IOException {
+                    if (!path.toRealPath().startsWith(boundary)) {
+                        throw new java.io.IOException("Cleanup escape");
+                    }
+                }
+                @Override public FileVisitResult preVisitDirectory(Path directory, java.nio.file.attribute.BasicFileAttributes attrs) throws java.io.IOException {
+                    check(directory);
+                    return FileVisitResult.CONTINUE;
+                }
+                @Override public FileVisitResult visitFile(Path file, java.nio.file.attribute.BasicFileAttributes attrs) throws java.io.IOException {
+                    if (!attrs.isSymbolicLink()) {
+                        check(file);
+                        file.toFile().setWritable(true);
+                    }
+                    Files.delete(file);
+                    return FileVisitResult.CONTINUE;
+                }
+                @Override public FileVisitResult postVisitDirectory(Path directory, java.io.IOException error) throws java.io.IOException {
+                    if (error != null) {
+                        throw error;
+                    }
+                    directory.toFile().setWritable(true);
+                    Files.delete(directory);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (Exception error) {
             throw new IllegalArgumentException("Instance cleanup failed");
+        }
+    }
+    void refreshPlain(UUID owner, UUID id, Path workspace, Path source) {
+        Path staging = workspace.resolveSibling(id + ".refresh-" + UUID.randomUUID());
+        Path previous = workspace.resolveSibling(id + ".previous-" + UUID.randomUUID());
+        boolean swapped = false;
+        try {
+            copy(source, staging, false);
+            Files.move(workspace, previous);
+            try {
+                Files.move(staging, workspace);
+                swapped = true;
+            } catch (Exception error) {
+                Files.move(previous, workspace);
+                throw error;
+            }
+            store.db.update("update project_instances set status='READY',state_fingerprint=? where id=? and owner_id=?",fingerprint(owner,id),id,owner);
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override public void afterCompletion(int status) {
+                        if (status == STATUS_COMMITTED) {
+                            deleteTree(previous);
+                        } else {
+                            deleteTree(workspace);
+                            try {
+                                Files.move(previous, workspace);
+                            } catch (java.io.IOException error) {
+                                throw new IllegalStateException("Snapshot rollback needs operator inspection");
+                            }
+                        }
+                    }
+                });
+        } catch (Exception error) {
+            if (swapped) {
+                deleteTree(workspace);
+                try {
+                    Files.move(previous, workspace);
+                } catch (java.io.IOException restoreError) {
+                    throw new IllegalArgumentException("Snapshot rollback needs operator inspection");
+                }
+            }
+            throw new IllegalArgumentException("Snapshot refresh failed; the previous snapshot was kept");
+        } finally {
+            deleteTree(staging);
         }
     }
     String fingerprint(UUID owner, UUID id) {
@@ -313,14 +379,10 @@ class ProjectManager {
         Path workspace = path(i);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            size(workspace);
-            walk(workspace, (file, attrs) -> {
-                digest.update(workspace.relativize(file).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                digest.update(Files.readAllBytes(file));
-            });
+            ProjectFiles.digest(workspace, cap(), digest);
             String commit = p.get("kind").equals("git") ? ref(workspace,"HEAD") : "plain";
             if (p.get("kind").equals("git")) {
-                digest.update(git(workspace,"diff","--cached","--raw","--no-abbrev","--no-ext-diff","--no-textconv").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                ProjectFiles.frame(digest, git(workspace,"diff","--cached","--raw","--no-abbrev","--no-ext-diff","--no-textconv").getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
             return commit + ":" + HexFormat.of().formatHex(digest.digest());
         } catch (Exception error) {
@@ -331,6 +393,9 @@ class ProjectManager {
         var result = new LinkedHashMap<>(row);
         result.remove("root_path");
         result.remove("workspace_path");
+        if (row.containsKey("lease_token")) {
+            result.put("leased", row.get("lease_token") != null);
+        }
         result.remove("lease_token");
         result.remove("lease_until");
         if (result.get("allowed_commands") != null) { result.remove("allowed_commands"); }
@@ -339,33 +404,36 @@ class ProjectManager {
     void maintain(UUID owner, UUID project, UUID id, String operation, JsonNode body) {
         enabled();
         store.tx.executeWithoutResult(tx -> {
+            store.db.queryForMap("select id from users where id=? for update", owner);
             var p = store.project(owner,project);
-            var i = Store.clean(store.db.queryForMap("select * from project_instances where id=? and project_id=? and owner_id=? for update",id,project,owner));
+            var i = Store.clean(store.db.queryForMap("select * from project_instances where id=? and project_id=? and owner_id=? and deleted_at is null for update",id,project,owner));
             if (i.get("lease_token") != null) {
                 throw new IllegalArgumentException("Instance is leased; inspect the run before maintenance");
+            }
+            if (operation.equals("archive")) {
+                store.db.update("update project_instances set status='ARCHIVED' where id=? and owner_id=?",id,owner);
+                return;
+            }
+            if (operation.equals("refresh") && Boolean.TRUE.equals(p.get("archived"))) {
+                throw new IllegalArgumentException("Restore the project before refreshing an instance");
             }
             Path workspace = path(i);
             if (operation.equals("refresh")) {
                 if (!p.get("kind").equals("git")) {
                     Path source = root(p.get("root_path").toString());
-                    size(source);
-                    deleteTree(workspace);
-                    copy(source,workspace,false);
-                    store.db.update("update project_instances set status='READY',state_fingerprint=? where id=? and owner_id=?",fingerprint(owner,id),id,owner);
+                    refreshPlain(owner, id, workspace, source);
                     return;
                 }
                 String revision = ref(workspace,body.path("ref").asText("HEAD"));
                 git(workspace,"reset","--hard",revision);
-                git(workspace,"clean","-fd");
+                git(workspace,"clean","-fdx");
                 store.db.update("update project_instances set state_fingerprint=? where id=? and owner_id=?",fingerprint(owner,id),id,owner);
                 store.db.update("update project_instances set ref=?,status='READY' where id=? and owner_id=?",revision,id,owner);
-            } else if (operation.equals("archive")) {
-                store.db.update("update project_instances set status='ARCHIVED' where id=? and owner_id=?",id,owner);
             } else if (operation.equals("delete")) {
                 if (p.get("kind").equals("git")) {
                     git(root(p.get("root_path").toString()),"worktree","remove","--force",workspace.toString());
                 } else { deleteTree(workspace); }
-                store.db.update("update project_instances set status='ARCHIVED' where id=? and owner_id=?",id,owner);
+                store.db.update("update project_instances set status='ARCHIVED',deleted_at=now() where id=? and owner_id=?",id,owner);
             }
         });
     }
