@@ -17,7 +17,7 @@ export function InstancePicker({value, onChange}:{value:string; onChange:(v:stri
  return <label className="field">Project instance
   <select value={value} onChange={e => onChange(e.target.value)}>
    <option value="">Workflow default / no project</option>
-   {instances.map(i => <option key={i.id} value={i.id}>{i.name} · {i.state_fingerprint?.slice(0,12)}</option>)}
+   {instances.map(i => <option key={i.id} value={i.id}>{i.name} Â· {i.state_fingerprint?.slice(0,12)}</option>)}
   </select>
   {error && <span role="alert">{error}</span>}
  </label>;
