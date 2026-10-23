@@ -62,6 +62,10 @@ Requirements: Java 21+, Node 22+ and PostgreSQL 17. The launcher downloads offic
 
 Native mode uses an isolated PostgreSQL cluster on `127.0.0.1:55432` and database polling instead of RabbitMQ. Existing project services are reused; unrelated processes are never replaced. Use `-PostgresBin` to select another PostgreSQL installation.
 
+If another project uses frontend port 5173, run `./scripts/start-local.ps1 -FrontendPort 5174`.
+The launcher remembers this port for later starts, including IntelliJ preparation,
+and prints the current app address. It never stops the other project.
+
 For IntelliJ IDEA, import `backend/pom.xml`. After initial setup, use **Application** or **DeskFlow Local**. Both select the `local` Spring profile and prepare dependencies before startup. The preparation task releases a recorded launcher-owned API so IntelliJ can own port 18080.
 
 To prepare dependencies manually without starting a second backend:
@@ -80,6 +84,64 @@ npm run dev
 ```
 
 `npm run build` creates the production frontend bundle. `npm run dev` starts the development server.
+
+## Google and GitHub sign-in
+
+Password sign-in remains available. Social sign-in is enabled per provider only
+when both its client ID and secret are configured in the ignored root `.env`:
+
+```dotenv
+APP_PUBLIC_URL=http://127.0.0.1:5174
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+```
+
+Register a Google OAuth **Web application** and a GitHub **OAuth App** named
+DeskFlow. The exact callbacks for the current local frontend are:
+
+- Google: `http://127.0.0.1:5174/api/auth/oauth2/callback/google`
+- GitHub: `http://127.0.0.1:5174/api/auth/oauth2/callback/github`
+
+Use the same hostname/port when opening the app. For Docker, set `APP_PUBLIC_URL`
+and registered callbacks to its frontend origin (normally `http://localhost:8088`).
+Restart the backend after changing credentials. Provider readiness is available
+at `/api/auth/oauth2/providers`; no credentials are returned by this API.
+
+Google requests OpenID profile/email; GitHub requests `read:user` and `user:email`,
+without repository access. **Continue with Google** signs in without a DeskFlow
+password. A verified Gmail or Google Workspace identity can open the existing
+workspace for that email directly. An external email used with Google may need a
+one-time email confirmation; it never asks for a DeskFlow password. Unverified
+credentials from a possible pre-signup are retired when mailbox ownership is first
+proven; workflows and workspace data are preserved. A valid existing session keeps
+the owner's password when connecting Google.
+
+GitHub email collisions require confirmation with the existing password or an
+already-connected provider. You can also connect providers from **Account →
+Connected accounts**. Confirmation expires after ten minutes. Identities use Google
+`sub` or GitHub user ID; provider access/refresh tokens are not retained after sign-in.
+
+Google Cloud project: **DeskFlow**, ID `supple-alpha-512517-f2`. The Google
+client and GitHub OAuth App are registered for the local origin above. Google is
+in testing mode with the developer account added as a test user. Both provider
+authorization screens have been verified, and Google's live callback has been
+verified through existing-account confirmation. Complete consent on your first
+sign-in. Passwordless Google sign-in and account recovery are covered by integration tests.
+
+## Forgot password
+
+Select **Forgot password?** under the password field on the sign-in form. Enter
+your account email, open the email link, and choose a new password. Links expire
+after 30 minutes, work once, and are stored only as hashes. A reset signs out old
+sessions. Google sign-in continues to work; social-only accounts can also use this
+flow to set a password. Responses do not disclose whether an email is registered.
+
+Local emails appear in **Mailpit at http://127.0.0.1:8025**, rather than a real inbox.
+For deployment, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+`SMTP_AUTH`, `SMTP_STARTTLS` (or `SMTP_SSL` for implicit TLS), and `ACCOUNT_MAIL_FROM`
+in the ignored `.env`. Use your public HTTPS frontend origin for `APP_PUBLIC_URL`.
 
 ## Try a workflow
 
@@ -127,4 +189,4 @@ External effects are at-least-once: recovery or replay can repeat a request or e
 
 Impact Lab simulations use explicit fixtures for external reads. They dispatch no HTTP requests, email or table writes, and do not prove a remote provider's behavior. Live action budgets count attempts across retries and nested workflows rather than currency.
 
-This portfolio release has private user workspaces and a bounded execution engine. Team sharing, OAuth app registration, arbitrary-code execution and enterprise SSO are outside its scope. Public deployment requires TLS, secure cookies, network egress isolation, quotas, backups and monitoring. Keep secrets in the credential store, not workflow input or configuration.
+This portfolio release has private user workspaces and a bounded execution engine. Team sharing, arbitrary-code execution and enterprise SSO are outside its scope. Public deployment requires TLS, secure cookies, network egress isolation, quotas, backups and monitoring. Keep secrets in the credential store, not workflow input or configuration.
