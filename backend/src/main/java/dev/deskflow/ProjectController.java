@@ -30,7 +30,7 @@ class ProjectController {
     }
     @GetMapping Object list(HttpServletRequest request) {
         projects.enabled();
-        return store.rows("select id,name,kind,created_at,archived from projects where owner_id=? order by created_at desc limit 100",owner(request));
+        return store.rows("select id,name,kind,created_at,archived from projects where owner_id=? and deleted_at is null order by created_at desc limit 100",owner(request));
     }
     @GetMapping("/{id}") Object get(@PathVariable UUID id, HttpServletRequest request) {
         projects.enabled();
@@ -41,28 +41,45 @@ class ProjectController {
     }
     @PutMapping("/{id}") Object update(@PathVariable UUID id, @RequestBody JsonNode body, HttpServletRequest request) {
         projects.enabled();
-        store.project(owner(request),id);
-        store.db.update("update projects set name=?,archived=? where id=? and owner_id=?",Json.required(body,"name",100),body.path("archived").asBoolean(),id,owner(request));
-        return projects.view(store.project(owner(request),id));
+        UUID owner = owner(request);
+        return store.tx.execute(tx -> {
+            store.db.queryForMap("select id from users where id=? for update", owner);
+            store.project(owner,id);
+            if (body.path("archived").asBoolean() && store.db.queryForObject(
+                "select count(*) from project_instances where project_id=? and owner_id=? and deleted_at is null and lease_token is not null",
+                Integer.class, id, owner) > 0) {
+                throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Wait for the project's active executions before archiving");
+            }
+            store.db.update("update projects set name=?,archived=? where id=? and owner_id=?",Json.required(body,"name",100),body.path("archived").asBoolean(),id,owner);
+            return projects.view(store.project(owner,id));
+        });
     }
     @DeleteMapping("/{id}") Object delete(@PathVariable UUID id, HttpServletRequest request) {
         projects.enabled();
-        store.project(owner(request),id);
-        int active = store.db.queryForObject("select count(*) from project_instances where project_id=? and owner_id=? and status<>'ARCHIVED'",Integer.class,id,owner(request));
-        if (active > 0) { throw new IllegalArgumentException("Archive or delete instances first"); }
-        store.db.update("update projects set archived=true where id=? and owner_id=?",id,owner(request));
+        UUID owner = owner(request);
+        store.tx.executeWithoutResult(tx -> {
+            store.db.queryForMap("select id from users where id=? for update", owner);
+            store.project(owner,id);
+            int active = store.db.queryForObject("select count(*) from project_instances where project_id=? and owner_id=? and deleted_at is null",Integer.class,id,owner);
+            if (active > 0) {
+                throw new IllegalArgumentException("Delete the project's instances first");
+            }
+            store.db.update("update projects set archived=true,deleted_at=now() where id=? and owner_id=?",id,owner);
+        });
         return Map.of("ok",true);
     }
     @GetMapping("/{id}/instances") Object instances(@PathVariable UUID id, HttpServletRequest request) {
         projects.enabled();
         store.project(owner(request),id);
-        return store.rows("select id,project_id,name,ref,status,state_fingerprint,base_instance_id,created_at from project_instances where project_id=? and owner_id=? order by created_at desc",id,owner(request));
+        return store.rows("select * from project_instances where project_id=? and owner_id=? and deleted_at is null order by created_at desc",id,owner(request)).stream().map(projects::view).toList();
     }
     @GetMapping("/{id}/instances/{instance}") Object instanceDetails(@PathVariable UUID id, @PathVariable UUID instance, HttpServletRequest request) {
         projects.enabled();
         store.project(owner(request),id);
         var row = store.instance(owner(request),instance);
-        if (!row.get("project_id").equals(id)) { throw new IllegalArgumentException("Instance does not belong to this project"); }
+        if (!row.get("project_id").equals(id)) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Not found");
+        }
         return projects.view(row);
     }
     @PutMapping("/{id}/instances/{instance}") Object renameInstance(@PathVariable UUID id, @PathVariable UUID instance, @RequestBody JsonNode body, HttpServletRequest request) {
