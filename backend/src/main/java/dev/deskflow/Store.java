@@ -82,7 +82,7 @@ class Store {
         });
     }
     Map<String,Object> execution(UUID owner,UUID id) {
-        var row=clean(db.queryForMap("select id,workflow_id,workflow_name,version,input,status,trigger_type,created_at,started_at,finished_at,cancel_requested,error,parent_id,root_id,effect_count,effect_limit from executions where id=? and owner_id=?",id,owner));
+        var row=clean(db.queryForMap("select id,workflow_id,workflow_name,version,input,status,trigger_type,created_at,started_at,finished_at,cancel_requested,error,parent_id,root_id,effect_count,effect_limit,project_id,instance_id,state_fingerprint from executions where id=? and owner_id=?",id,owner));
         row.put("steps",rows("select node_id,label,type,status,attempts,output,error,state,started_at,finished_at from steps where execution_id=? order by started_at nulls last,node_id",id));
         row.put("approvals",rows("select id,node_id,title,status,created_at,decided_at from approvals where execution_id=?",id));
         row.put("children",rows("select id,workflow_name,status,parent_node_id,child_index from executions where parent_id=? order by child_index",id));
@@ -90,6 +90,20 @@ class Store {
         if(!root.equals(id))row.putAll(db.queryForMap("select effect_count,effect_limit from executions where id=?",root));
         row.put("effects",rows("select execution_id,node_id,kind,target,created_at from effect_events where root_id=? order by id limit 1000",root));
         return row;
+    }
+    Map<String,Object> project(UUID owner, UUID id) {
+        return clean(db.queryForMap("select * from projects where id=? and owner_id=?", id, owner));
+    }
+    Map<String,Object> instance(UUID owner, UUID id) {
+        return clean(db.queryForMap("select * from project_instances where id=? and owner_id=?", id, owner));
+    }
+    boolean claimInstance(UUID owner, UUID instance, UUID run) {
+        return db.update("update project_instances set lease_token=?,lease_until=now()+interval '90 seconds',status='BUSY' where id=? and owner_id=? and status in ('READY','BUSY') and (lease_token=? or lease_token is null) and not exists(select 1 from executions e where e.instance_id=project_instances.id and e.id<>? and e.status in ('RUNNING','WAITING','RETRYING'))", run, instance, owner, run, run) == 1;
+    }
+    void releaseInstance(UUID owner, UUID instance, UUID run, boolean terminal) {
+        if (terminal) {
+            db.update("update project_instances set lease_token=null,lease_until=null,status='READY' where id=? and owner_id=? and lease_token=?", instance, owner, run);
+        }
     }
     String redact(UUID owner,String value) {
         String result=value;
