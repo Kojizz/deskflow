@@ -165,6 +165,7 @@ class ProjectManager {
                 }
                 size(target);
                 store.db.update("insert into project_instances(id,owner_id,project_id,name,ref,workspace_path,status,base_instance_id) values(?,?,?,?,?,?,'READY',?)", id, owner, project, Json.required(body,"name",100), revision, target.toString(), baseId);
+                store.db.update("update project_instances set state_fingerprint=? where id=? and owner_id=?",fingerprint(owner,id),id,owner);
                 return view(store.instance(owner,id));
             } catch (Exception error) {
                 if (revision != null) {
@@ -269,6 +270,7 @@ class ProjectManager {
                 String revision = ref(workspace,body.path("ref").asText("HEAD"));
                 git(workspace,"reset","--hard",revision);
                 git(workspace,"clean","-fd");
+                store.db.update("update project_instances set state_fingerprint=? where id=? and owner_id=?",fingerprint(owner,id),id,owner);
                 store.db.update("update project_instances set ref=?,status='READY' where id=? and owner_id=?",revision,id,owner);
             } else if (operation.equals("archive")) {
                 store.db.update("update project_instances set status='ARCHIVED' where id=? and owner_id=?",id,owner);
