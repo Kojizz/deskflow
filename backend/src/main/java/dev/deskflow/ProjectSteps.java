@@ -17,7 +17,7 @@ class ProjectSteps {
     }
     static void validateArgv(JsonNode argv) {
         if (!argv.isArray() || argv.isEmpty() || argv.size() > 64) {
-            throw new IllegalArgumentException("Use an argv array with 1–64 entries");
+            throw new IllegalArgumentException("Use an argv array with 1â€“64 entries");
         }
         for (var arg : argv) {
             if (!arg.isTextual() || arg.asText().length() > 4096 || arg.asText().indexOf('\0') >= 0) {
@@ -54,6 +54,7 @@ class ProjectSteps {
         }
         var instance = store.instance(owner,instanceId);
         var project = store.project(owner,(UUID)instance.get("project_id"));
+        projects.root(project.get("root_path").toString());
         Path workspace = projects.path(instance);
         var config = Templates.render(node.config(),context);
         if (node.kind().equals("project.read")) {
@@ -74,18 +75,22 @@ class ProjectSteps {
         } else {
             if (!project.get("kind").equals("git")) { throw new IllegalArgumentException("Git steps require a Git instance"); }
             argv = git(workspace,config);
+            argv.add(1,"-c");
+            argv.add(2,"core.worktree="+workspace);
         }
-        if (store.db.queryForObject("select count(*) from effect_events where execution_id=? and node_id=?",Integer.class,run,node.id()) > 0) {
+        if (store.db.queryForObject("select count(*) from effect_events f join executions e on e.id=f.execution_id where e.owner_id=? and f.execution_id=? and f.node_id=?",Integer.class,owner,run,node.id()) > 0) {
             throw new Actions.Failure("Inspect before resume: this project command may already have run",false);
         }
         guard.reserve(run,node,"instance:"+instanceId);
         UUID root = execution.get("root_id") == null ? run : (UUID)execution.get("root_id");
-        String output = ProjectProcesses.run(workspace,argv,config.path("timeoutSeconds").asInt(30),() -> {
+        String output = ProjectProcesses.run(workspace,argv,Math.max(1,Math.min(60,config.path("timeoutSeconds").asInt(30))),() -> {
             projects.enabled();
             return Boolean.TRUE.equals(store.db.queryForObject("select exists(select 1 from executions where owner_id=? and id in (?,?) and cancel_requested)",Boolean.class,owner,run,root));
         });
         projects.size(workspace);
-        return Json.M.valueToTree(Json.map("output",store.redact(owner,output),"instanceId",instanceId,"fingerprint",projects.fingerprint(owner,instanceId)));
+        String fingerprint = projects.fingerprint(owner,instanceId);
+        store.db.update("update project_instances set state_fingerprint=? where id=? and owner_id=?",fingerprint,instanceId,owner);
+        return Json.M.valueToTree(Json.map("output",store.redact(owner,output),"instanceId",instanceId,"fingerprint",fingerprint));
     }
     JsonNode read(Path workspace, JsonNode config) {
         Path target = ProjectManager.inside(workspace,config.path("path").asText());
@@ -111,7 +116,7 @@ class ProjectSteps {
             case "status" -> projects.gitArgs("status","--porcelain");
             case "diff" -> projects.gitArgs("diff","--no-ext-diff","--no-textconv","--");
             case "log" -> projects.gitArgs("log","-20","--format=%h %s");
-            case "checkout" -> projects.gitArgs("checkout","--detach",projects.ref(workspace,config.path("ref").asText("HEAD")));
+            case "checkout" -> projects.gitArgs("checkout","--detach",projects.validRef(config.path("ref").asText("HEAD")));
             case "commit" -> projects.gitArgs("-c","user.name=DeskFlow","-c","user.email=automation@deskflow.local","-c","commit.gpgsign=false","commit","-am",Json.required(config,"message",200));
             default -> throw new IllegalArgumentException("Unsupported Git operation");
         };

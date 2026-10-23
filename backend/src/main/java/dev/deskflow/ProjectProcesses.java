@@ -10,6 +10,7 @@ import java.util.function.BooleanSupplier;
 final class ProjectProcesses {
     static String run(Path cwd, List<String> argv, int seconds, BooleanSupplier cancelled) {
         Process process = null;
+        java.util.concurrent.atomic.AtomicBoolean overflow = new java.util.concurrent.atomic.AtomicBoolean();
         Set<ProcessHandle> children = ConcurrentHashMap.newKeySet();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try {
@@ -34,6 +35,8 @@ final class ProjectProcesses {
                     while ((count = input.read(bytes)) != -1) {
                         synchronized (output) {
                             if (output.size() + count > 65536) {
+                                overflow.set(true);
+                                running.descendants().forEach(children::add);
                                 running.destroyForcibly();
                                 return;
                             }
@@ -60,6 +63,9 @@ final class ProjectProcesses {
             reader.join(1000);
             if (reader.isAlive() || children.stream().anyMatch(ProcessHandle::isAlive)) {
                 throw new Actions.Failure("Background processes are forbidden", false);
+            }
+            if (overflow.get()) {
+                throw new Actions.Failure("Command output exceeds 64 KB", false);
             }
             if (process.exitValue() != 0) {
                 throw new Actions.Failure("Project command failed; inspect before resume", false);
