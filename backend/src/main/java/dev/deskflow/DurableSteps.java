@@ -43,7 +43,10 @@ class DurableSteps {
                     else input=c.has("input")?Templates.render(c.path("input"),context):context.path("input");
                     var selectedChild = new LinkedHashMap<>(child);
                     Object instance = c.hasNonNull("instanceId") ? UUID.fromString(c.path("instanceId").asText()) : run.get("instance_id");
-                    if (instance != null) { selectedChild.put("_instance",instance); }
+                    if (instance != null) {
+                        selectedChild.put("_instance",instance);
+                        selectedChild.put("_inheritInstance",true);
+                    }
                     UUID childId=store.enqueue(selectedChild,input,node.kind(),"child:"+id+":"+node.id()+":"+index);
                     store.db.update("update executions set parent_id=?,parent_node_id=?,child_index=?,root_id=?,depth=? where id=?",id,node.id(),index,run.get("root_id")==null?id:run.get("root_id"),depth+1,childId);
                     children.add(childId.toString());index++;

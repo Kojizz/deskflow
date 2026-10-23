@@ -15,6 +15,10 @@ class Engine {
         if(claimed.isEmpty())return;
         var run=Store.clean(claimed.getFirst());UUID owner=(UUID)run.get("owner_id");
         try{
+            if (run.get("instance_id") instanceof UUID instanceId && store.instance(owner,instanceId).get("status").equals("STALE")) {
+                finish(id,lease,"FAILED","Inspect before resume: the instance lease expired or a project action failed");
+                return;
+            }
             if (run.get("instance_id") instanceof UUID instance && !store.claimInstance(owner,instance,id)) {
                 release(id,lease,"QUEUED",2);
                 return;
@@ -56,6 +60,9 @@ class Engine {
                 if(output.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>65536)throw new Actions.Failure("Step output exceeds 64 KB",false);
                 store.tx.executeWithoutResult(s->{store.db.update("update steps set status='SUCCEEDED',output=?::jsonb,error=null,finished_at=now() where execution_id=? and node_id=?",output,id,node.id());release(id,lease,"RUNNING",0);});
             }catch(Exception e){
+                if (node.kind().equals("project.command") || node.kind().equals("project.git")) {
+                    store.db.update("update project_instances set status='STALE' where id=? and owner_id=?",run.get("instance_id"),owner);
+                }
                 boolean retry=e instanceof Actions.Failure f&&f.retry&&attempts+1<limit;
                 String error=e instanceof Actions.Failure||e instanceof IllegalArgumentException?e.getMessage():"Action failed; check configuration";
                 error=store.redact(owner,error==null?"Action failed":error);
