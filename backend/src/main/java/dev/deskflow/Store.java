@@ -11,6 +11,9 @@ import java.util.*;
 
 @Service
 class Store {
+    @org.springframework.beans.factory.annotation.Autowired
+    @org.springframework.context.annotation.Lazy
+    ProjectManager projects;
     final JdbcTemplate db; final TransactionTemplate tx; final Secrets secrets;
     Store(JdbcTemplate db,TransactionTemplate tx,Secrets secrets) { this.db=db;this.tx=tx;this.secrets=secrets; }
     static Map<String,Object> clean(Map<String,Object> row) {
@@ -75,6 +78,21 @@ class Store {
                 return (UUID)existing.get("id");
             }
             var graph=new Graph((JsonNode)wf.get("definition"));
+            Object selected = wf.get("_instance");
+            if (selected == null && graph.settings.hasNonNull("instanceId")) {
+                selected = UUID.fromString(graph.settings.path("instanceId").asText());
+            }
+            if (selected != null) {
+                UUID instanceId = UUID.fromString(selected.toString());
+                UUID owner = (UUID)wf.get("owner_id");
+                var instance = instance(owner,instanceId);
+                if (!Set.of("READY", "BUSY").contains(instance.get("status"))) {
+                    throw new IllegalArgumentException("Instance is not ready");
+                }
+                db.update("update executions set project_id=?,instance_id=?,state_fingerprint=? where id=? and owner_id=?",instance.get("project_id"),instanceId,projects.fingerprint(owner,instanceId),id,owner);
+            } else if (graph.nodes.stream().anyMatch(n -> n.kind().startsWith("project."))) {
+                throw new IllegalArgumentException("Select an instance for project steps");
+            }
             db.update("update executions set root_id=id,effect_limit=? where id=?",graph.settings.path("effectLimit").asInt(100),id);
             for(var node:graph.nodes) db.update("insert into steps(execution_id,node_id,label,type) values(?,?,?,?)",id,node.id(),node.label(),node.kind());
             db.update("insert into outbox(execution_id) values(?)",id);
@@ -98,11 +116,18 @@ class Store {
         return clean(db.queryForMap("select * from project_instances where id=? and owner_id=?", id, owner));
     }
     boolean claimInstance(UUID owner, UUID instance, UUID run) {
-        return db.update("update project_instances set lease_token=?,lease_until=now()+interval '90 seconds',status='BUSY' where id=? and owner_id=? and status in ('READY','BUSY') and (lease_token=? or lease_token is null) and not exists(select 1 from executions e where e.instance_id=project_instances.id and e.id<>? and e.status in ('RUNNING','WAITING','RETRYING'))", run, instance, owner, run, run) == 1;
+        return tx.execute(status -> {
+            db.queryForMap("select id from users where id=? for update",owner);
+            UUID root = db.queryForObject("select coalesce(root_id,id) from executions where id=? and owner_id=?",UUID.class,run,owner);
+            int active = db.queryForObject("select count(*) from project_instances where owner_id=? and lease_token is not null and lease_token<>?",Integer.class,owner,root);
+            if (active >= projects.env.getProperty("app.projects.max-concurrent-runs",Integer.class,2)) { return false; }
+            return db.update("update project_instances set lease_token=?,lease_until=now()+interval '90 seconds',status='BUSY' where id=? and owner_id=? and status in ('READY','BUSY') and (lease_token=? or lease_token is null) and not exists(select 1 from executions e where e.owner_id=? and e.instance_id=project_instances.id and e.id<>? and e.status='RUNNING' and e.lease_until>now())",root,instance,owner,root,owner,run) == 1;
+        });
     }
     void releaseInstance(UUID owner, UUID instance, UUID run, boolean terminal) {
-        if (terminal) {
-            db.update("update project_instances set lease_token=null,lease_until=null,status='READY' where id=? and owner_id=? and lease_token=?", instance, owner, run);
+        UUID root = db.queryForObject("select coalesce(root_id,id) from executions where id=? and owner_id=?",UUID.class,run,owner);
+        if (terminal && root.equals(run)) {
+            db.update("update project_instances set lease_token=null,lease_until=null,status='READY' where id=? and owner_id=? and lease_token=?",instance,owner,root);
         }
     }
     String redact(UUID owner,String value) {
