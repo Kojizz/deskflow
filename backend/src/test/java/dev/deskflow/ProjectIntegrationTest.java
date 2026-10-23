@@ -164,4 +164,85 @@ class ProjectIntegrationTest {
         assertEquals("source",Files.readString(source.resolve("file.txt")));
     }
 
+    jakarta.servlet.http.Cookie session() {
+        String token = Secrets.token();
+        store.db.update("insert into sessions(token_hash,user_id,expires_at) values(?,?,now()+interval '1 hour')",Secrets.hash(token),owner);
+        return new jakarta.servlet.http.Cookie("deskflow_session",token);
+    }
+    @Test void deletionHidesInstancesButPreservesRunHistory() throws Exception {
+        UUID project = project("plain");
+        UUID instance = instance(project);
+        UUID run = run(instance,1);
+        var cookie = session();
+        mvc.perform(delete("/api/projects/"+project+"/instances/"+instance).cookie(cookie).header("X-Deskflow-Request","1"))
+            .andExpect(status().isOk());
+        mvc.perform(get("/api/projects/"+project+"/instances").cookie(cookie)).andExpect(content().json("[]"));
+        mvc.perform(get("/api/projects/"+project+"/instances/"+instance).cookie(cookie)).andExpect(status().isNotFound());
+        assertEquals(instance,store.execution(owner,run).get("instance_id"));
+        assertFalse(Files.exists(directory.resolve("instances").resolve(instance.toString())));
+        mvc.perform(delete("/api/projects/"+project).cookie(cookie).header("X-Deskflow-Request","1")).andExpect(status().isOk());
+        mvc.perform(get("/api/projects/"+project).cookie(cookie)).andExpect(status().isNotFound());
+        assertEquals(instance,store.execution(owner,run).get("instance_id"));
+    }
+    @Test void archivedInstanceCanBeRestoredAndQueuedRunsTerminate() throws Exception {
+        UUID project = project("plain");
+        UUID instance = instance(project);
+        UUID run = run(instance,1);
+        manager.maintain(owner,project,instance,"archive",Json.read("{}"));
+        engine.advance(run);
+        assertEquals("FAILED",store.execution(owner,run).get("status"));
+        manager.maintain(owner,project,instance,"refresh",Json.read("{}"));
+        assertEquals("READY",store.instance(owner,instance).get("status"));
+        store.db.update("update project_instances set status='STALE' where id=? and owner_id=?",instance,owner);
+        manager.maintain(owner,project,instance,"refresh",Json.read("{}"));
+        assertEquals("READY",store.instance(owner,instance).get("status"));
+    }
+    @Test void deletedSnapshotReleasesTheInstanceQuota() throws Exception {
+        var env = new org.springframework.mock.env.MockEnvironment()
+            .withProperty("app.projects.enabled","true")
+            .withProperty("app.projects.allowed-roots",directory.toString())
+            .withProperty("app.projects.workspace-root",directory.resolve("instances").toString())
+            .withProperty("app.projects.max-instances","1");
+        var limited = new ProjectManager(store,env);
+        UUID project = project("plain");
+        UUID instance = instance(project);
+        assertThrows(IllegalArgumentException.class,() -> limited.create(owner,project,Json.read("{\"name\":\"Second\"}"),null));
+        manager.maintain(owner,project,instance,"archive",Json.read("{}"));
+        assertThrows(IllegalArgumentException.class,() -> limited.create(owner,project,Json.read("{\"name\":\"Second\"}"),null));
+        manager.maintain(owner,project,instance,"delete",Json.read("{}"));
+        assertNotNull(limited.create(owner,project,Json.read("{\"name\":\"Second\"}"),null));
+    }
+    @Test void forksPreserveStagedAndUnstagedStateWithoutChangingTheirBase() throws Exception {
+        UUID project = project("git");
+        UUID base = instance(project);
+        Path workspace = manager.path(store.instance(owner,base));
+        Files.writeString(workspace.resolve("file.txt"),"staged");
+        manager.git(workspace,"add","file.txt");
+        Files.writeString(workspace.resolve("file.txt"),"unstaged");
+        Files.writeString(workspace.resolve("untracked.txt"),"untracked");
+        Files.createDirectories(workspace.resolve("empty/folder"));
+        String before = manager.fingerprint(owner,base);
+        UUID fork = (UUID)manager.create(owner,project,Json.read("{\"name\":\"Full fork\"}"),base).get("id");
+        Path target = manager.path(store.instance(owner,fork));
+        assertEquals("unstaged",Files.readString(target.resolve("file.txt")));
+        assertEquals("untracked",Files.readString(target.resolve("untracked.txt")));
+        assertTrue(Files.isDirectory(target.resolve("empty/folder")));
+        assertTrue(manager.git(target,"diff","--cached","--","file.txt").contains("+staged"));
+        assertEquals(before,manager.fingerprint(owner,base));
+        assertEquals(before,manager.fingerprint(owner,fork));
+    }
+    @Test void idempotencyKeysIncludeTheSelectedInstance() throws Exception {
+        UUID project = project("plain");
+        UUID first = instance(project);
+        UUID second = instance(project);
+        var definition = Json.read("{\"nodes\":["+GraphTest.node("start","manual","{}")+"],\"edges\":[]}");
+        var workflow = store.save(owner,null,Json.M.valueToTree(Map.of("name","Same input","definition",definition,"active",false)));
+        workflow.put("_instance",first);
+        UUID run = store.enqueue(workflow,Json.read("{}"),"manual","same-key");
+        assertEquals(run,store.enqueue(workflow,Json.read("{}"),"manual","same-key"));
+        workflow.put("_instance",second);
+        var error = assertThrows(org.springframework.web.server.ResponseStatusException.class,() -> store.enqueue(workflow,Json.read("{}"),"manual","same-key"));
+        assertEquals(409,error.getStatusCode().value());
+    }
+
 }
