@@ -15,6 +15,10 @@ class Engine {
         if(claimed.isEmpty())return;
         var run=Store.clean(claimed.getFirst());UUID owner=(UUID)run.get("owner_id");
         try{
+            if (run.get("instance_id") instanceof UUID instance && !store.claimInstance(owner,instance,id)) {
+                release(id,lease,"QUEUED",2);
+                return;
+            }
             boolean rootCancelled=store.db.queryForObject("select cancel_requested or status in ('FAILED','CANCELLED') from executions where id=?",Boolean.class,run.get("root_id")==null?id:run.get("root_id"));
             if((boolean)run.get("cancel_requested")||rootCancelled){finish(id,lease,"CANCELLED",null);return;}
             var graph=new Graph((JsonNode)run.get("definition"));
@@ -35,7 +39,7 @@ class Engine {
             if(skip){store.db.update("update steps set status='SKIPPED',finished_at=now() where execution_id=? and node_id=?",id,ready.id());release(id,lease,"RUNNING",0);return;}
             var node=ready;var previous=steps.get(node.id());boolean resuming=previous.get("status").equals("WAITING");
             int attempts=((Number)previous.get("retry_attempts")).intValue();int limit=node.config().path("maxAttempts").asInt(3);
-            if(!resuming&&attempts>=limit){store.db.update("update steps set status='FAILED',error='Attempt limit reached after interruption',finished_at=now() where execution_id=? and node_id=?",id,node.id());finish(id,lease,"FAILED","Attempt limit reached after interruption; inspect external effects before resuming");return;}
+            if(!resuming&&(attempts>=limit || (nodeMutates(previous) && attempts>0))){store.db.update("update steps set status='FAILED',error='Attempt limit reached after interruption',finished_at=now() where execution_id=? and node_id=?",id,node.id());finish(id,lease,"FAILED","Attempt limit reached after interruption; inspect external effects before resuming");return;}
             var parents=context.putObject("parents");
             for(var e:graph.incoming(node.id()))if(edgeActive(graph,e,steps))parents.set(e.source(),(JsonNode)steps.get(e.source()).get("output"));
             store.db.update("update steps set status='RUNNING',attempts=attempts+?,retry_attempts=retry_attempts+?,started_at=coalesce(started_at,now()),error=null where execution_id=? and node_id=?",resuming?0:1,resuming?0:1,id,node.id());
@@ -61,6 +65,15 @@ class Engine {
                 }else{store.db.update("update steps set status='FAILED',error=?,finished_at=now() where execution_id=? and node_id=?",error,id,node.id());finish(id,lease,"FAILED",error);}
             }
         }catch(Exception e){finish(id,lease,"FAILED","Execution could not continue; check workflow and credentials");}
+        finally {
+            if (run.get("instance_id") instanceof UUID instance) {
+                String state = store.db.queryForObject("select status from executions where id=? and owner_id=?",String.class,id,owner);
+                store.releaseInstance(owner,instance,id,Set.of("SUCCEEDED","FAILED","CANCELLED").contains(state));
+            }
+        }
+    }
+    static boolean nodeMutates(Map<String,Object> step) {
+        return Set.of("project.command", "project.git").contains(step.get("type"));
     }
     static boolean edgeActive(Graph graph,Graph.Edge edge,Map<String,Map<String,Object>> steps){var s=steps.get(edge.source());return Graph.active(graph.find(edge.source()),(String)s.get("status"),(JsonNode)s.get("output"),edge.handle());}
     void release(UUID id,UUID lease,String status,int delay){

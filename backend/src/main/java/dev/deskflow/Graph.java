@@ -11,7 +11,7 @@ final class Graph {
     final List<Node> nodes=new ArrayList<>();
     final List<Edge> edges=new ArrayList<>();
     final JsonNode settings;
-    static final Set<String> KINDS=Set.of("manual","webhook","schedule","form","transform","condition","filter","switch","merge","format","collection","delay","approval","subworkflow","loop","table","http","email","ai","fail");
+    static final Set<String> KINDS=Set.of("project.command","project.read","project.git","manual","webhook","schedule","form","transform","condition","filter","switch","merge","format","collection","delay","approval","subworkflow","loop","table","http","email","ai","fail");
     static final Set<String> TERMINAL=Set.of("SUCCEEDED","SKIPPED","RECOVERED");
     Graph(JsonNode definition) {
         Json.bounded(definition);settings=definition.path("settings");
@@ -53,6 +53,7 @@ final class Graph {
         if(c.has("retryDelaySeconds"))range(c,"retryDelaySeconds",1,60);
         if(!Set.of("stop","continue","route").contains(c.path("onError").asText("stop")))fail("Invalid error policy");
         switch(kind){
+            case "project.command", "project.read", "project.git" -> ProjectSteps.validate(kind,c);
             case "schedule" -> {if(c.path("mode").asText("interval").equals("cron")){CronExpression.parse(Json.required(c,"cron",100));try{ZoneId.of(Json.text(c,"timezone","UTC"));}catch(java.time.DateTimeException e){fail("Invalid schedule timezone");}Schedules.next(c,java.time.Instant.now());}else range(c,"intervalMinutes",1,10080);}
             case "form" -> validateFields(c.path("fields"));
             case "transform" -> Json.bounded(c.path("output"));
