@@ -15,9 +15,15 @@ import java.util.*;
 @Configuration
 class Security {
     @Bean BCryptPasswordEncoder passwords() { return new BCryptPasswordEncoder(12); }
-    @Bean SecurityFilterChain chain(HttpSecurity http) throws Exception {
+    @Bean SecurityFilterChain chain(HttpSecurity http,SocialLogin social) throws Exception {
         return http.csrf(c->c.disable()).authorizeHttpRequests(a->a.anyRequest().permitAll())
-            .sessionManagement(s->s.sessionCreationPolicy(org.springframework.security.config.http.SessionCreationPolicy.STATELESS))
+            .sessionManagement(s->s.sessionCreationPolicy(org.springframework.security.config.http.SessionCreationPolicy.IF_REQUIRED))
+            .securityContext(s->s.securityContextRepository(new org.springframework.security.web.context.NullSecurityContextRepository()))
+            .oauth2Login(o->o.authorizedClientRepository(new TransientAuthorizedClients()).loginPage("/api/auth/oauth2/unavailable")
+                .authorizationEndpoint(a->a.baseUri("/api/auth/oauth2/authorize"))
+                .redirectionEndpoint(r->r.baseUri("/api/auth/oauth2/callback/*"))
+                .userInfoEndpoint(u->u.userService(social.githubUserService()))
+                .successHandler(social::success).failureHandler(social::failure))
             .httpBasic(b->b.disable()).formLogin(f->f.disable()).build();
     }
 }
@@ -37,7 +43,7 @@ class SessionFilter extends OncePerRequestFilter {
                 var ids=db.queryForList("select user_id from sessions where token_hash=? and expires_at>now()",UUID.class,Secrets.hash(cookie.getValue()));
                 if(!ids.isEmpty()) req.setAttribute("userId",ids.getFirst());
             }
-            if(!Set.of("/api/auth/login","/api/auth/register").contains(path) && req.getAttribute("userId")==null) {
+            if(!Set.of("/api/auth/login","/api/auth/register","/api/auth/forgot-password","/api/auth/reset-password","/api/auth/oauth2/providers","/api/auth/oauth2/unavailable","/api/auth/oauth2/pending-link","/api/auth/oauth2/confirm-link","/api/auth/oauth2/cancel-link","/api/auth/oauth2/email-link","/api/auth/oauth2/confirm-email").contains(path) && !path.startsWith("/api/auth/oauth2/start/") && req.getAttribute("userId")==null) {
                 reject(res,401,"Please sign in"); return;
             }
         }
