@@ -20,7 +20,7 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-@SpringBootTest(properties={"app.role=test","app.encryption-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","spring.rabbitmq.listener.simple.auto-startup=false","management.health.rabbit.enabled=false"})
+@SpringBootTest(properties={"app.role=test","app.encryption-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","spring.rabbitmq.listener.simple.auto-startup=false","management.health.rabbit.enabled=false","GOOGLE_CLIENT_ID=oauth-test-client","GOOGLE_CLIENT_SECRET=test-secret","GITHUB_CLIENT_ID=github-test-client","GITHUB_CLIENT_SECRET=test-secret"})
 @AutoConfigureMockMvc
 class IntegrationTest {
     static PostgreSQLContainer<?> postgres;
@@ -39,10 +39,266 @@ class IntegrationTest {
     @Autowired Store store;
     @Autowired Engine engine;
     @Autowired MockMvc mvc;
+    @Autowired SocialLogin social;
+    @Autowired AccountRecovery recovery;
+    org.springframework.test.web.servlet.ResultActions recoveryPost(String path,Map<String,Object> body)throws Exception{
+        return mvc.perform(post("/api/auth/"+path).header("X-Deskflow-Request","1").contentType("application/json").content(Json.write(body)));
+    }
+    String emailedToken()throws Exception{
+        recovery.executor.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+        var capture=org.mockito.ArgumentCaptor.forClass(org.springframework.mail.SimpleMailMessage.class);
+        verify(mail,timeout(3000)).send(capture.capture());
+        String text=capture.getValue().getText();String token=text.substring(text.indexOf("#token=")+7).split("\\s")[0];
+        assertTrue(token.matches("[A-Za-z0-9_-]{43}"));return token;
+    }
+    @Test void gmailSignInOpensExistingWorkspaceAndRetiresUnverifiedCredentials()throws Exception{
+        setLinkPassword();var wf=workflow(simple());var old=session(owner);String email=owner+"@gmail.com",subject=UUID.randomUUID().toString();
+        store.db.update("update users set email=? where id=?",email,owner);social.resolve("github",UUID.randomUUID().toString(),email,"Test",owner);
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal("google",subject,email,true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));assertNotNull(res.getHeader("Set-Cookie"));assertNull(req.getSession(false));
+        assertEquals(owner,social.resolve("google",subject,email,"Test",null));
+        assertNull(store.db.queryForObject("select password_hash from users where id=?",String.class,owner));
+        assertNotNull(store.db.queryForObject("select email_verified_at from users where id=?",Object.class,owner));
+        assertEquals(0,store.db.queryForObject("select count(*) from sessions where token_hash=?",Integer.class,Secrets.hash(old.getValue())));
+        assertEquals(0,store.db.queryForObject("select count(*) from oauth_identities where user_id=? and provider='github'",Integer.class,owner));
+        assertEquals(owner,store.db.queryForObject("select owner_id from workflows where id=?",UUID.class,wf.get("id")));
+    }
+    @Test void authenticatedGoogleConnectionPreservesTheOwnersPassword()throws Exception{
+        setLinkPassword();String email=owner+"@gmail.com";store.db.update("update users set email=? where id=?",email,owner);var cookie=session(owner);
+        var start=mvc.perform(get("/api/auth/oauth2/start/google").cookie(cookie)).andExpect(status().is3xxRedirection()).andReturn();
+        var req=new org.springframework.mock.web.MockHttpServletRequest();req.setSession(start.getRequest().getSession(false));var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal("google",UUID.randomUUID().toString(),email,true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));
+        assertTrue(social.auth.passwords.matches(LINK_PASSWORD,store.db.queryForObject("select password_hash from users where id=?",String.class,owner)));
+    }
+    @Test void googleWorkspaceClaimAllowsPasswordlessSignInButUnverifiedEmailDoesNot()throws Exception{
+        setLinkPassword();store.db.update("update users set email_verified_at=now() where id=?",owner);
+        var original=socialPrincipal("google",UUID.randomUUID().toString(),owner+"@example.com",true);
+        var attributes=new HashMap<String,Object>(original.getPrincipal().getAttributes());attributes.put("hd","example.com");
+        var principal=new org.springframework.security.oauth2.core.user.DefaultOAuth2User(original.getAuthorities(),attributes,"sub");
+        var token=new org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken(principal,original.getAuthorities(),"google");
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();social.success(req,res,token);
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));
+        assertTrue(social.auth.passwords.matches(LINK_PASSWORD,store.db.queryForObject("select password_hash from users where id=?",String.class,owner)));
+        assertFalse(social.authoritativeGoogle("google",Map.of("email","test@gmail.com","email_verified",false,"hd","example.com")));
+        assertFalse(social.authoritativeGoogle("github",Map.of("email","test@gmail.com","email_verified",true)));
+    }
+    @Test void changedGoogleEmailDoesNotVerifyTheOriginalMailbox()throws Exception{
+        String subject=UUID.randomUUID().toString();social.resolve("google",subject,owner+"@example.com","Test",owner);
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal("google",subject,UUID.randomUUID()+"@gmail.com",true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));
+        assertNull(store.db.queryForObject("select email_verified_at from users where id=?",Object.class,owner));
+    }
+    @Test void externalGoogleEmailUsesEmailConfirmationRatherThanAPassword()throws Exception{
+        setLinkPassword();String subject=UUID.randomUUID().toString();var pending=pendingSocial("google",subject);
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).header("X-Deskflow-Request","1").contentType("application/json").content(Json.write(Map.of("password",LINK_PASSWORD))))
+            .andExpect(status().isConflict());
+        mvc.perform(post("/api/auth/oauth2/email-link").session(pending).header("X-Deskflow-Request","1")).andExpect(status().isOk());
+        String token=emailedToken();
+        recoveryPost("oauth2/confirm-email",Map.of("token",token,"subject","forged")).andExpect(status().isOk()).andExpect(jsonPath("$.id").value(owner.toString()));
+        assertEquals(owner,social.resolve("google",subject,owner+"@example.com","Test",null));
+        recoveryPost("oauth2/confirm-email",Map.of("token",token)).andExpect(status().isBadRequest());
+    }
+    @Test void forgotPasswordResponseDoesNotDiscloseAccountExistence()throws Exception{
+        String known=recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse().getContentAsString();
+        String token=emailedToken();
+        assertEquals(1,store.db.queryForObject("select count(*) from account_email_tokens where token_hash=? and user_id=?",Integer.class,Secrets.hash(token),owner));
+        assertEquals(0,store.db.queryForObject("select count(*) from account_email_tokens where token_hash=?",Integer.class,token));
+        String unknown=recoveryPost("forgot-password",Map.of("email",UUID.randomUUID()+"@example.invalid")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        recovery.executor.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);assertEquals(known,unknown);verify(mail,times(1)).send(any(org.springframework.mail.SimpleMailMessage.class));
+    }
+    @Test void resetPasswordWorksOnceAndRevokesOldSessions()throws Exception{
+        setLinkPassword();store.db.update("update users set email_verified_at=now() where id=?",owner);
+        var old=session(owner);String subject=UUID.randomUUID().toString();social.resolve("google",subject,owner+"@example.com","Test",owner);
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk());String token=emailedToken(),password="my-new-secure-password";
+        recoveryPost("reset-password",Map.of("token",token,"password",password)).andExpect(status().isOk()).andExpect(header().doesNotExist("Set-Cookie"));
+        mvc.perform(get("/api/auth/me").cookie(old)).andExpect(status().isUnauthorized());
+        recoveryPost("login",Map.of("email",owner+"@example.com","password",LINK_PASSWORD)).andExpect(status().isUnauthorized());
+        recoveryPost("login",Map.of("email",owner+"@example.com","password",password)).andExpect(status().isOk()).andExpect(jsonPath("$.id").value(owner.toString()));
+        recoveryPost("reset-password",Map.of("token",token,"password","another-new-password")).andExpect(status().isBadRequest());
+        assertEquals(owner,social.resolve("google",subject,owner+"@example.com","Test",null));
+    }
+    @Test void shortPasswordsDoNotConsumeAResetLinkAndExpiredOrWrongPurposeLinksFail()throws Exception{
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk());String token=emailedToken();
+        recoveryPost("reset-password",Map.of("token",token,"password","short")).andExpect(status().isBadRequest());
+        recoveryPost("oauth2/confirm-email",Map.of("token",token)).andExpect(status().isBadRequest());
+        assertEquals(1,store.db.queryForObject("select count(*) from account_email_tokens where user_id=?",Integer.class,owner));
+        store.db.update("update account_email_tokens set expires_at=now()-interval '1 minute' where user_id=?",owner);
+        recoveryPost("reset-password",Map.of("token",token,"password","valid-new-password")).andExpect(status().isBadRequest());
+        assertEquals("unused",store.db.queryForObject("select password_hash from users where id=?",String.class,owner));
+    }
+    @Test void resetCanSetAPasswordForASocialOnlyAccount()throws Exception{
+        store.db.update("update users set password_hash=null,email_verified_at=now() where id=?",owner);
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk());String token=emailedToken();
+        recoveryPost("reset-password",Map.of("token",token,"password","social-account-password")).andExpect(status().isOk());
+        recoveryPost("login",Map.of("email",owner+"@example.com","password","social-account-password")).andExpect(status().isOk());
+    }
+    @Test void forgotPasswordHasAMailCooldownAndSanitizesSmtpFailure()throws Exception{
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk());emailedToken();
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk());
+        recovery.executor.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);verify(mail,times(1)).send(any(org.springframework.mail.SimpleMailMessage.class));
+        store.db.update("delete from account_email_tokens where user_id=?",owner);
+        doThrow(new org.springframework.mail.MailSendException("fake SMTP failure")).when(mail).send(any(org.springframework.mail.SimpleMailMessage.class));
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isOk()).andExpect(content().json(Json.write(AccountRecovery.SENT)));
+        recovery.executor.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+        assertEquals(0,store.db.queryForObject("select count(*) from account_email_tokens where user_id=?",Integer.class,owner));
+    }
+    @Test void recoveryRequiresSameOriginMutationHeaderAndIsRateLimited()throws Exception{
+        mvc.perform(post("/api/auth/forgot-password").contentType("application/json").content(Json.write(Map.of("email",owner+"@example.com")))).andExpect(status().isForbidden());
+        recoveryPost("reset-password",Map.of("token","invalid","password","valid-new-password")).andExpect(status().isBadRequest());
+        social.auth.limits.put("127.0.0.1",new long[]{System.currentTimeMillis(),20});
+        recoveryPost("forgot-password",Map.of("email",owner+"@example.com")).andExpect(status().isTooManyRequests());
+    }
+    static final String LINK_PASSWORD="existing-workspace-password";
+    org.springframework.mock.web.MockHttpSession pendingSocial(String provider,String subject)throws Exception{
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal(provider,subject,owner+"@example.com",true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_link=confirm"));assertNull(res.getHeader("Set-Cookie"));
+        return (org.springframework.mock.web.MockHttpSession)req.getSession(false);
+    }
+    void setLinkPassword(){store.db.update("update users set password_hash=? where id=?",social.auth.passwords.encode(LINK_PASSWORD),owner);}
+    @Test void existingEmailCallbackOffersConfirmationInsteadOfFailure()throws Exception{
+        setLinkPassword();var pending=pendingSocial("google",UUID.randomUUID().toString());
+        mvc.perform(get("/api/auth/oauth2/pending-link").session(pending)).andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control","no-store")).andExpect(jsonPath("$.active").value(true))
+            .andExpect(jsonPath("$.email").value(owner+"@example.com")).andExpect(jsonPath("$.hasPassword").value(true));
+        assertEquals(0,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,owner));
+    }
+    @Test void passwordConfirmationLinksAndSignsIntoTheOriginalWorkspace()throws Exception{
+        setLinkPassword();var wf=workflow(simple());String subject=UUID.randomUUID().toString();var pending=pendingSocial("github",subject);
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).header("X-Deskflow-Request","1").contentType("application/json")
+            .content(Json.write(Map.of("password",LINK_PASSWORD,"email","forged@example.com","provider","google","subject","forged"))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.id").value(owner.toString())).andExpect(header().string("Set-Cookie",org.hamcrest.Matchers.containsString("deskflow_session=")));
+        assertTrue(pending.isInvalid());assertEquals(owner,social.resolve("github",subject,"changed@example.com","Changed",null));
+        assertEquals(owner,store.db.queryForObject("select owner_id from workflows where id=?",UUID.class,wf.get("id")));
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal("github",subject,owner+"@example.com",true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));assertNull(req.getSession(false));
+    }
+    @Test void wrongPasswordCannotLinkAndKeepsConfirmationRetryable()throws Exception{
+        setLinkPassword();var pending=pendingSocial("github",UUID.randomUUID().toString());
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).header("X-Deskflow-Request","1").contentType("application/json").content("{\"password\":\"incorrect-password\"}"))
+            .andExpect(status().isUnauthorized());
+        assertFalse(pending.isInvalid());assertEquals(0,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,owner));
+    }
+    @Test void signedInOwnerCanExplicitlyConfirmWithoutAnotherPassword()throws Exception{
+        String subject=UUID.randomUUID().toString();var pending=pendingSocial("google",subject);var cookie=session(owner);
+        mvc.perform(get("/api/auth/oauth2/pending-link").session(pending).cookie(cookie)).andExpect(status().isOk()).andExpect(jsonPath("$.alreadySignedIn").value(true));
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).cookie(cookie).header("X-Deskflow-Request","1").contentType("application/json").content("{}"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.id").value(owner.toString()));
+        assertEquals(owner,social.resolve("google",subject,owner+"@example.com","Test",null));
+    }
+    @Test void signInFailureReturnsToSignInRatherThanRegistration()throws Exception{
+        var started=mvc.perform(get("/api/auth/oauth2/start/google").param("intent","login")).andExpect(status().is3xxRedirection()).andReturn();
+        var req=new org.springframework.mock.web.MockHttpServletRequest();req.setSession(started.getRequest().getSession(false));var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.failure(req,res,new org.springframework.security.oauth2.core.OAuth2AuthenticationException("access_denied"));
+        assertTrue(res.getRedirectedUrl().contains("auth=signin"));
+    }
+    @Test void competingLinkCannotReplaceAnExistingProvider()throws Exception{
+        setLinkPassword();var pending=pendingSocial("github",UUID.randomUUID().toString());
+        String original=UUID.randomUUID().toString();social.resolve("github",original,owner+"@example.com","Test",owner);
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).header("X-Deskflow-Request","1").contentType("application/json").content(Json.write(Map.of("password",LINK_PASSWORD))))
+            .andExpect(status().isConflict());
+        assertEquals(original,store.db.queryForObject("select subject from oauth_identities where user_id=? and provider='github'",String.class,owner));
+    }
+    @Test void pendingProofCannotBeUsedFromAnotherBrowserOrWithoutMutationHeader()throws Exception{
+        setLinkPassword();var pending=pendingSocial("google",UUID.randomUUID().toString());
+        mvc.perform(get("/api/auth/oauth2/pending-link")).andExpect(status().isOk()).andExpect(jsonPath("$.active").value(false));
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).contentType("application/json").content(Json.write(Map.of("password",LINK_PASSWORD)))).andExpect(status().isForbidden());
+        mvc.perform(post("/api/auth/oauth2/confirm-link").header("X-Deskflow-Request","1").contentType("application/json").content(Json.write(Map.of("password",LINK_PASSWORD)))).andExpect(status().isGone());
+    }
+    @Test void expiredAndCancelledProofsCannotLinkAccounts()throws Exception{
+        var pending=pendingSocial("google",UUID.randomUUID().toString());var proof=(SocialLogin.PendingLink)pending.getAttribute(SocialLogin.PENDING_LINK);
+        pending.setAttribute(SocialLogin.PENDING_LINK,new SocialLogin.PendingLink(proof.provider(),proof.subject(),proof.email(),proof.name(),proof.userId(),0));
+        mvc.perform(post("/api/auth/oauth2/confirm-link").session(pending).header("X-Deskflow-Request","1").contentType("application/json").content("{}")).andExpect(status().isGone());
+        var cancel=pendingSocial("google",UUID.randomUUID().toString());
+        mvc.perform(post("/api/auth/oauth2/cancel-link").session(cancel).header("X-Deskflow-Request","1")).andExpect(status().isOk());assertTrue(cancel.isInvalid());
+        assertEquals(0,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,owner));
+    }
+    @Test void existingSocialProviderCanConfirmANewProviderWithoutPassword()throws Exception{
+        store.db.update("update users set password_hash=null where id=?",owner);
+        String googleSubject=UUID.randomUUID().toString(),githubSubject=UUID.randomUUID().toString();
+        social.resolve("google",googleSubject,owner+"@example.com","Test",owner);
+        var pending=pendingSocial("github",githubSubject);
+        mvc.perform(get("/api/auth/oauth2/pending-link").session(pending)).andExpect(status().isOk()).andExpect(jsonPath("$.hasPassword").value(false)).andExpect(jsonPath("$.existingProviders[0]").value("google"));
+        var started=mvc.perform(get("/api/auth/oauth2/start/google").param("confirm","true").session(pending)).andExpect(status().is3xxRedirection()).andReturn();
+        var req=new org.springframework.mock.web.MockHttpServletRequest();req.setSession(started.getRequest().getSession(false));
+        var res=new org.springframework.mock.web.MockHttpServletResponse();social.success(req,res,socialPrincipal("google",googleSubject,owner+"@example.com",true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=linked"));assertEquals(owner,social.resolve("github",githubSubject,owner+"@example.com","Test",null));
+    }
+    @Test void confirmingWithADifferentSocialAccountCannotMergeWorkspaces()throws Exception{
+        String googleSubject=UUID.randomUUID().toString();social.resolve("google",googleSubject,owner+"@example.com","Test",owner);
+        var pending=pendingSocial("github",UUID.randomUUID().toString());
+        var started=mvc.perform(get("/api/auth/oauth2/start/google").param("confirm","true").session(pending)).andReturn();
+        var req=new org.springframework.mock.web.MockHttpServletRequest();req.setSession(started.getRequest().getSession(false));
+        var res=new org.springframework.mock.web.MockHttpServletResponse();social.success(req,res,socialPrincipal("google",UUID.randomUUID().toString(),"unrelated@example.com",true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_error=confirmation_account_mismatch"));assertNull(res.getHeader("Set-Cookie"));
+        assertEquals(1,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,owner));
+    }
+    @Test void callbackWithoutValidStateCannotCreateAnAccount()throws Exception{
+        int before=store.db.queryForObject("select count(*) from users",Integer.class);
+        mvc.perform(get("/api/auth/oauth2/callback/google").param("code","not-a-real-code").param("state","not-the-browser-state"))
+            .andExpect(status().is3xxRedirection()).andExpect(header().string("Location",org.hamcrest.Matchers.containsString("oauth_error=failed")));
+        assertEquals(before,store.db.queryForObject("select count(*) from users",Integer.class));
+    }
+    @Test void callbackRejectsUnverifiedEmailWithoutSession()throws Exception{
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal(false));
+        assertTrue(res.getRedirectedUrl().contains("oauth_error=verified_email_required"));assertNull(res.getHeader("Set-Cookie"));
+    }
+    @Test void callbackCannotLinkAfterOriginalSessionExpires()throws Exception{
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        req.getSession().setAttribute("linkUser",owner);req.getSession().setAttribute("linkSession","expired-session");
+        social.success(req,res,socialPrincipal(true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_error=link_expired"));assertNull(res.getHeader("Set-Cookie"));
+    }
+    @Test void verifiedCallbackCreatesOnlyAnOpaqueDeskflowSession()throws Exception{
+        var req=new org.springframework.mock.web.MockHttpServletRequest();var res=new org.springframework.mock.web.MockHttpServletResponse();
+        social.success(req,res,socialPrincipal(true));
+        assertTrue(res.getRedirectedUrl().contains("oauth_success=signed_in"));
+        assertTrue(res.getHeader("Set-Cookie").contains("deskflow_session="));assertTrue(res.getHeader("Set-Cookie").contains("HttpOnly"));
+    }
+    org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken socialPrincipal(boolean verified){
+        return socialPrincipal("google",UUID.randomUUID().toString(),UUID.randomUUID()+"@example.com",verified);
+    }
+    org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken socialPrincipal(String provider,String subject,String email,boolean verified){
+        var authorities=List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_USER"));
+        String attribute=provider.equals("google")?"sub":"id";
+        var principal=new org.springframework.security.oauth2.core.user.DefaultOAuth2User(authorities,Map.of(attribute,subject,"email",email,"email_verified",verified,"name","OAuth test"),attribute);
+        return new org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken(principal,authorities,provider);
+    }
+    @Test void socialLoginUsesProviderSubjectEvenAfterEmailChanges(){
+        String subject=UUID.randomUUID().toString();String email=UUID.randomUUID()+"@example.com";
+        UUID id=social.resolve("google",subject,email,"Social User",null);
+        assertEquals(id,social.resolve("google",subject,UUID.randomUUID()+"@example.com","New name",null));
+        assertEquals(1,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,id));
+    }
+    @Test void socialLoginNeverAutomaticallyMergesAnExistingEmail(){
+        assertThrows(org.springframework.security.oauth2.core.OAuth2AuthenticationException.class,()->social.resolve("google",UUID.randomUUID().toString(),owner+"@example.com","Test",null));
+        assertEquals(0,store.db.queryForObject("select count(*) from oauth_identities where user_id=?",Integer.class,owner));
+    }
+    @Test void explicitLinkKeepsWorkspaceAndRejectsAnotherOwner(){
+        String subject=UUID.randomUUID().toString();String email=UUID.randomUUID()+"@example.com";
+        assertEquals(owner,social.resolve("github",subject,email,"Test",owner));
+        assertEquals(owner,social.resolve("github",subject,email,"Test",null));
+        assertThrows(org.springframework.security.oauth2.core.OAuth2AuthenticationException.class,()->social.resolve("github",subject,email,"Test",UUID.randomUUID()));
+    }
+    @Test void socialOnlyAccountsCannotUsePasswordLogin()throws Exception{
+        String email=UUID.randomUUID()+"@example.com";
+        social.resolve("google",UUID.randomUUID().toString(),email,"Test",null);
+        mvc.perform(post("/api/auth/login").header("X-Deskflow-Request","1").contentType("application/json").content(Json.write(Map.of("email",email,"password","incorrect-password")))).andExpect(status().isUnauthorized());
+    }
+    @Test void socialReadinessIsPublicButConnectionsArePrivate()throws Exception{
+        mvc.perform(get("/api/auth/oauth2/providers")).andExpect(status().isOk()).andExpect(jsonPath("$.google").isBoolean()).andExpect(jsonPath("$.github").isBoolean());
+        mvc.perform(get("/api/auth/oauth2/connections")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/auth/oauth2/connections").cookie(session(owner))).andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
     @MockitoSpyBean Actions actions;
     @MockitoBean JavaMailSender mail;
     UUID owner;
-    @BeforeEach void owner(){owner=UUID.randomUUID();store.db.update("insert into users(id,email,name,password_hash) values(?,?,?,?)",owner,owner+"@example.com","Test User","unused");}
+    @BeforeEach void owner(){social.auth.limits.clear();owner=UUID.randomUUID();store.db.update("insert into users(id,email,name,password_hash) values(?,?,?,?)",owner,owner+"@example.com","Test User","unused");}
     Cookie session(UUID user){String token=Secrets.token();store.db.update("insert into sessions(token_hash,user_id,expires_at) values(?,?,now()+interval '1 day')",Secrets.hash(token),user);return new Cookie("deskflow_session",token);}
     JsonNode simple(){return Json.read("{\"nodes\":["+GraphTest.node("start","manual","{}")+","+GraphTest.node("map","transform","{\"output\":{\"total\":\"{{input.total}}\"}}")+"],\"edges\":["+GraphTest.edge("start","map")+"]}");}
     Map<String,Object> workflow(JsonNode definition){return store.save(owner,null,Json.M.valueToTree(Json.map("name","Test workflow","description","Fixture","active",false,"definition",definition)));}
