@@ -22,8 +22,10 @@ class ApiController {
     @PostMapping("/workflows/validate") Object validate(@RequestBody JsonNode body,HttpServletRequest r) {
         var g=new Graph(body);store.credentialRefs(owner(r),g);return Map.of("valid",true,"nodes",g.nodes.size());
     }
-    @PostMapping("/workflows/{id}/execute") Object run(@PathVariable UUID id,@RequestBody JsonNode body,@RequestHeader(value="Idempotency-Key",required=false) String key,HttpServletRequest r) {
-        return Map.of("id",store.enqueue(store.workflow(owner(r),id),body,"manual",key));
+    @PostMapping("/workflows/{id}/execute") Object run(@PathVariable UUID id,@RequestBody JsonNode body,@RequestHeader(value="Idempotency-Key",required=false) String key,@RequestParam(required=false) UUID instanceId,HttpServletRequest r) {
+        var workflow = new LinkedHashMap<>(store.workflow(owner(r),id));
+        if (instanceId != null) { workflow.put("_instance",instanceId); }
+        return Map.of("id",store.enqueue(workflow,body,"manual",key));
     }
     @GetMapping("/executions") Object executions(@RequestParam(required=false) UUID workflowId,@RequestParam(defaultValue="") String status,@RequestParam(defaultValue="") String search,@RequestParam(defaultValue="0") int offset,HttpServletRequest r) {
         if(workflowId!=null) store.workflow(owner(r),workflowId);
