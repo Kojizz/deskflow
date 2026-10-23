@@ -1,7 +1,7 @@
 import {useState,useEffect,type ReactNode} from 'react';
 import {Zap,Webhook,Clock,Braces,GitBranch,Globe,Mail,X,Check,Copy,LoaderCircle,FileInput,ListFilter,Route,Merge,CaseSensitive,List,Timer,UserCheck,Workflow,Repeat2,Database,Sparkles,OctagonX} from 'lucide-react';
 import type {Kind} from './model';
-export const icons={manual:Zap,webhook:Webhook,schedule:Clock,transform:Braces,condition:GitBranch,http:Globe,email:Mail,form:FileInput,filter:ListFilter,switch:Route,merge:Merge,format:CaseSensitive,collection:List,delay:Timer,approval:UserCheck,subworkflow:Workflow,loop:Repeat2,table:Database,ai:Sparkles,fail:OctagonX};
+export const icons={'project.command':Workflow,'project.read':FileInput,'project.git':GitBranch,manual:Zap,webhook:Webhook,schedule:Clock,transform:Braces,condition:GitBranch,http:Globe,email:Mail,form:FileInput,filter:ListFilter,switch:Route,merge:Merge,format:CaseSensitive,collection:List,delay:Timer,approval:UserCheck,subworkflow:Workflow,loop:Repeat2,table:Database,ai:Sparkles,fail:OctagonX};
 export function StepIcon({kind,size=18}:{kind:Kind;size?:number}){const Icon=icons[kind];return <Icon size={size}/>;}
 export function Badge({status}:{status:string}) {return <span className={`badge ${status.toLowerCase()}`}><i/>{status.toLowerCase().replaceAll('_',' ')}</span>;}
 export function Empty({icon,title,children}:{icon:ReactNode;title:string;children:ReactNode}) {return <div className="empty"><span className="empty-icon">{icon}</span><h3>{title}</h3><div>{children}</div></div>;}
