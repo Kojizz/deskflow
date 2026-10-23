@@ -15,6 +15,7 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - run: git --version
       - run: mvn -B -ntp verify
   frontend:
     runs-on: ubuntu-latest
