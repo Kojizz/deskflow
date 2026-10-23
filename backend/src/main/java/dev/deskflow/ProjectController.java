@@ -30,7 +30,7 @@ class ProjectController {
     }
     @GetMapping Object list(HttpServletRequest request) {
         projects.enabled();
-        return store.rows("select id,name,kind,allowed_commands,created_at,archived from projects where owner_id=? order by created_at desc limit 100",owner(request));
+        return store.rows("select id,name,kind,created_at,archived from projects where owner_id=? order by created_at desc limit 100",owner(request));
     }
     @GetMapping("/{id}") Object get(@PathVariable UUID id, HttpServletRequest request) {
         projects.enabled();
@@ -57,6 +57,18 @@ class ProjectController {
         projects.enabled();
         store.project(owner(request),id);
         return store.rows("select id,project_id,name,ref,status,state_fingerprint,base_instance_id,created_at from project_instances where project_id=? and owner_id=? order by created_at desc",id,owner(request));
+    }
+    @GetMapping("/{id}/instances/{instance}") Object instanceDetails(@PathVariable UUID id, @PathVariable UUID instance, HttpServletRequest request) {
+        projects.enabled();
+        store.project(owner(request),id);
+        var row = store.instance(owner(request),instance);
+        if (!row.get("project_id").equals(id)) { throw new IllegalArgumentException("Instance does not belong to this project"); }
+        return projects.view(row);
+    }
+    @PutMapping("/{id}/instances/{instance}") Object renameInstance(@PathVariable UUID id, @PathVariable UUID instance, @RequestBody JsonNode body, HttpServletRequest request) {
+        instanceDetails(id,instance,request);
+        store.db.update("update project_instances set name=? where id=? and project_id=? and owner_id=?",Json.required(body,"name",100),instance,id,owner(request));
+        return projects.view(store.instance(owner(request),instance));
     }
     @PostMapping("/{id}/instances") Object instance(@PathVariable UUID id, @RequestBody JsonNode body, HttpServletRequest request) {
         return projects.create(owner(request),id,body,null);

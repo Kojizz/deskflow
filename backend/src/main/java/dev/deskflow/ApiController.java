@@ -40,6 +40,7 @@ class ApiController {
     @PostMapping("/executions/{id}/replay") Object replay(@PathVariable UUID id,HttpServletRequest r) {
         var execution=Store.clean(store.db.queryForMap("select * from executions where id=? and owner_id=?",id,owner(r)));
         var wf=Json.map("id",execution.get("workflow_id"),"owner_id",owner(r),"name",execution.get("workflow_name"),"version",execution.get("version"),"definition",execution.get("definition"));
+        if (execution.get("instance_id") != null) { wf.put("_instance",execution.get("instance_id")); }
         return Map.of("id",store.enqueue(wf,(JsonNode)execution.get("input"),"replay",null));
     }
     @GetMapping("/credentials") Object credentials(HttpServletRequest r) { return store.rows("select id,name,created_at from credentials where owner_id=? order by created_at desc",owner(r)); }

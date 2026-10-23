@@ -51,7 +51,12 @@ class ImpactLab {
                             if(!items.isArray()||items.size()>20)throw new IllegalArgumentException("Preview loop needs at most 20 items");
                             int index=0;
                             for(var item:items){JsonNode childInput=node.kind().equals("loop")?Json.M.valueToTree(Json.map("item",item,"index",index,"source",input)):item;
-                                var childResult=walk(owner,(JsonNode)child.get("definition"),childInput,mocks,path+"["+index+"]/",depth+1,preview);
+                                var childDefinition = (com.fasterxml.jackson.databind.node.ObjectNode)((JsonNode)child.get("definition")).deepCopy();
+                                String inheritedInstance = c.path("instanceId").asText(definition.path("settings").path("instanceId").asText(""));
+                                if (!inheritedInstance.isBlank()) {
+                                    childDefinition.withObject("/settings").put("instanceId",inheritedInstance);
+                                }
+                                var childResult=walk(owner,childDefinition,childInput,mocks,path+"["+index+"]/",depth+1,preview);
                                 if(!childResult.get("status").equals("SUCCEEDED"))throw new IllegalArgumentException("Child preview incomplete: "+childResult.get("status"));
                                 results.add(Map.of("steps",childResult.get("outputs")));index++;
                             }
