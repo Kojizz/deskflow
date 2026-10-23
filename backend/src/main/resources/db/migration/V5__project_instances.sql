@@ -18,6 +18,7 @@ CREATE TABLE project_instances (
  workspace_path text NOT NULL,
  status text NOT NULL CHECK (status IN ('READY','BUSY','STALE','ARCHIVED')),
  base_instance_id uuid REFERENCES project_instances(id),
+ state_fingerprint text,
  lease_token uuid,
  lease_until timestamptz,
  created_at timestamptz NOT NULL DEFAULT now(),
