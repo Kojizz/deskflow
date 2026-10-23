@@ -35,9 +35,21 @@ services:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_RABBITMQ_USERNAME: deskflow
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
-      SPRING_MAIL_HOST: mailpit
+      SPRING_MAIL_HOST: ${SMTP_HOST:-mailpit}
+      SPRING_MAIL_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_AUTH: ${SMTP_AUTH:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      ACCOUNT_MAIL_FROM: ${ACCOUNT_MAIL_FROM:-accounts@deskflow.local}
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?Run scripts/setup.ps1 first}
       APP_ROLE: api
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8088}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
     depends_on:
       postgres: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}

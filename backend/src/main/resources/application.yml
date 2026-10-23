@@ -1,4 +1,8 @@
 spring:
+  config:
+    import:
+      - "optional:file:./.env[.properties]"
+      - "optional:file:../.env[.properties]"
   datasource:
     url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/deskflow}
     username: ${DATABASE_USER:deskflow}
@@ -15,9 +19,15 @@ spring:
         default-requeue-rejected: false
         prefetch: 4
   mail:
-    host: localhost
-    port: 1025
+    host: ${SMTP_HOST:localhost}
+    port: ${SMTP_PORT:1025}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
     properties:
+      mail.smtp.auth: ${SMTP_AUTH:false}
+      mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+      mail.smtp.starttls.required: ${SMTP_STARTTLS:false}
+      mail.smtp.ssl.enable: ${SMTP_SSL:false}
       mail.smtp.connectiontimeout: 5000
       mail.smtp.timeout: 5000
       mail.smtp.writetimeout: 5000
@@ -25,11 +35,19 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 server:
+  servlet:
+    session:
+      cookie:
+        same-site: lax
+        http-only: true
+        secure: ${COOKIE_SECURE:false}
   error:
     include-message: never
   tomcat:
     max-http-form-post-size: 256KB
 app:
+  public-url: ${APP_PUBLIC_URL:http://127.0.0.1:5174}
+  account-mail-from: ${ACCOUNT_MAIL_FROM:accounts@deskflow.local}
   role: ${APP_ROLE:api}
   encryption-key: ${APP_ENCRYPTION_KEY:}
   worker-enabled: false

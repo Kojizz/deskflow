@@ -41,7 +41,7 @@ class AuthController {
     @PostMapping("/login") ResponseEntity<?> login(@RequestBody JsonNode body,HttpServletRequest req) {
         rate(req); var mail=email(body); var pass=password(body);
         var users=db.queryForList("select id,password_hash from users where email=?",mail);
-        if(users.isEmpty() || !passwords.matches(pass,(String)users.getFirst().get("password_hash"))) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Email or password is incorrect");
+        if(users.isEmpty() || users.getFirst().get("password_hash")==null || !passwords.matches(pass,(String)users.getFirst().get("password_hash"))) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Email or password is incorrect");
         return session((UUID)users.getFirst().get("id"));
     }
     ResponseEntity<?> session(UUID id) {
@@ -49,7 +49,7 @@ class AuthController {
         db.update("delete from sessions where expires_at<now()");
         db.update("insert into sessions(token_hash,user_id,expires_at) values(?,?,now()+interval '7 days')",Secrets.hash(token),id);
         String cookie=ResponseCookie.from("deskflow_session",token).httpOnly(true).secure(secure).sameSite("Strict").path("/").maxAge(604800).build().toString();
-        return ResponseEntity.ok().header(HttpHeaders.SET_COOKIE,cookie).body(user(id));
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).header(HttpHeaders.SET_COOKIE,cookie).body(user(id));
     }
     @GetMapping("/me") Map<String,Object> me(HttpServletRequest req) { return user((UUID)req.getAttribute("userId")); }
     Map<String,Object> user(UUID id) { return db.queryForMap("select id,email,name from users where id=?",id); }

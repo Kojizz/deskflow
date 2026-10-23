@@ -1,5 +1,6 @@
 param(
   [string]$PostgresBin = 'C:/Program Files/PostgreSQL/17/bin',
+  [ValidateRange(0,65535)][int]$FrontendPort = 0,
   [switch]$SkipBuild,
   [switch]$InfrastructureOnly
 )
@@ -13,12 +14,20 @@ $jar=Join-Path $projectRoot 'backend/target/deskflow-0.2.0.jar'
 $vite=Join-Path $projectRoot 'frontend/node_modules/vite/bin/vite.js'
 $mailpit=Join-Path $toolsDir 'mailpit/mailpit.exe'
 $statePath=Join-Path $runtime 'processes.json'
+$frontendPortPath=Join-Path $runtime 'frontend-port.txt'
+if($FrontendPort -eq 0){
+ if(Test-Path -LiteralPath $frontendPortPath){
+  $savedPort=(Get-Content -LiteralPath $frontendPortPath -Raw).Trim()
+  if(-not [int]::TryParse($savedPort,[ref]$FrontendPort)){throw 'Saved frontend port is invalid. Pass -FrontendPort explicitly.'}
+ }else{$FrontendPort=5173}
+}
+if($FrontendPort -lt 1024 -or $FrontendPort -gt 65535){throw 'FrontendPort must be between 1024 and 65535.'}
 New-Item -ItemType Directory -Path $toolsDir,$logs -Force | Out-Null
 & (Join-Path $PSScriptRoot 'setup.ps1')
 $settings=Get-Content -LiteralPath (Join-Path $projectRoot '.env') | ConvertFrom-StringData
 # Reuse only listeners whose command line identifies this exact checkout.
 # IntelliJ owns its JVM; it is deliberately excluded from launcher-managed PIDs.
-$listeners=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.LocalPort -in @(55432,18080,5173,1025,8025)})
+$listeners=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.LocalPort -in @(55432,18080,$FrontendPort,1025,8025)})
 function Get-ProjectListener {
  param([int]$Port,[string[]]$Paths)
  $ownerIds=@($listeners | Where-Object {$_.LocalPort -eq $Port} | Select-Object -ExpandProperty OwningProcess -Unique)
@@ -54,7 +63,7 @@ $existingPg=Get-ProjectListener -Port 55432 -Paths @($pgdata)
 $existingMail=Get-ProjectListener -Port 1025 -Paths @($mailpit)
 $existingInbox=Get-ProjectListener -Port 8025 -Paths @($mailpit)
 if(($existingMail -and -not $existingInbox) -or ($existingInbox -and -not $existingMail) -or ($existingMail -and $existingInbox -and $existingMail.ProcessId -ne $existingInbox.ProcessId)){throw 'Mailpit has a partial or conflicting listener. Stop the local mail service before restarting.'}
-$existingUi=Get-ProjectListener -Port 5173 -Paths @($vite)
+$existingUi=Get-ProjectListener -Port $FrontendPort -Paths @($vite)
 foreach($tool in @('java','node','npm.cmd')) { if(-not (Get-Command $tool -ErrorAction SilentlyContinue)) {throw "$tool is required."} }
 # Java writes version/property diagnostics to stderr even when it succeeds.
 # Redirect at the process boundary so Windows PowerShell 5.1 does not turn
@@ -116,6 +125,8 @@ if($existingMail){$managedPids+=$existingMail.ProcessId;Write-Host 'Reusing Mail
 }
 if(-not $InfrastructureOnly -and -not $existingApi){
 $env:APP_ENCRYPTION_KEY=$settings.APP_ENCRYPTION_KEY
+$previousPublicUrl=$env:APP_PUBLIC_URL
+$env:APP_PUBLIC_URL=$(if($settings.APP_PUBLIC_URL){$settings.APP_PUBLIC_URL}else{"http://127.0.0.1:$FrontendPort"})
 $env:SPRING_DATASOURCE_URL='jdbc:postgresql://127.0.0.1:55432/deskflow'
 $env:SPRING_DATASOURCE_USERNAME='deskflow'
 $env:SPRING_DATASOURCE_PASSWORD=$settings.POSTGRES_PASSWORD
@@ -125,15 +136,17 @@ $env:SPRING_RABBITMQ_LISTENER_SIMPLE_AUTO_STARTUP='false';$env:MANAGEMENT_HEALTH
 try{
 $apiProcess=Start-Process -FilePath $javaBinary -ArgumentList @('-jar',('"'+$jar+'"')) -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'api.out.log') -RedirectStandardError (Join-Path $logs 'api.err.log') -PassThru
  $managedPids+=$apiProcess.Id
-}finally{foreach($name in @('APP_ENCRYPTION_KEY','SPRING_DATASOURCE_PASSWORD')){Remove-Item "Env:$name" -ErrorAction SilentlyContinue}}
+}finally{$env:APP_PUBLIC_URL=$previousPublicUrl;foreach($name in @('APP_ENCRYPTION_KEY','SPRING_DATASOURCE_PASSWORD')){Remove-Item "Env:$name" -ErrorAction SilentlyContinue}}
 }elseif($existingApi -and -not $apiInIdea){$managedPids+=$existingApi.ProcessId}
 if($existingUi){$managedPids+=$existingUi.ProcessId;Write-Host 'Reusing the frontend.'}else{
-$uiProcess=Start-Process -FilePath (Get-Command node).Source -ArgumentList @(('"'+$vite+'"'),'--host','127.0.0.1','--port','5173') -WorkingDirectory (Join-Path $projectRoot 'frontend') -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'ui.out.log') -RedirectStandardError (Join-Path $logs 'ui.err.log') -PassThru
+$uiProcess=Start-Process -FilePath (Get-Command node).Source -ArgumentList @(('"'+$vite+'"'),'--host','127.0.0.1','--port',"$FrontendPort",'--strictPort') -WorkingDirectory (Join-Path $projectRoot 'frontend') -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'ui.out.log') -RedirectStandardError (Join-Path $logs 'ui.err.log') -PassThru
  $managedPids+=$uiProcess.Id
 }
-@{root=$projectRoot;postgresBin=$PostgresBin;pgdata=$pgdata;pids=@($managedPids);apiMode=$(if($apiInIdea){'IntelliJ'}elseif($existingApi -or -not $InfrastructureOnly){'launcher'}else{'infrastructure'});externalApiPid=$(if($apiInIdea){$existingApi.ProcessId}else{$null})} | ConvertTo-Json | Set-Content -LiteralPath $statePath
+@{root=$projectRoot;postgresBin=$PostgresBin;pgdata=$pgdata;frontendPort=$FrontendPort;pids=@($managedPids);apiMode=$(if($apiInIdea){'IntelliJ'}elseif($existingApi -or -not $InfrastructureOnly){'launcher'}else{'infrastructure'});externalApiPid=$(if($apiInIdea){$existingApi.ProcessId}else{$null})} | ConvertTo-Json | Set-Content -LiteralPath $statePath
+Set-Content -LiteralPath $frontendPortPath -Value $FrontendPort
 if($InfrastructureOnly){
  Write-Host 'Infrastructure is ready: PostgreSQL, Mailpit and frontend.'
+ Write-Host "App: http://127.0.0.1:$FrontendPort"
  if($existingApi){Write-Host "Existing backend preserved (PID $($existingApi.ProcessId))."}
  else{Write-Host 'Run Application or DeskFlow Local in IntelliJ to start the backend on port 18080.'}
  return
@@ -146,7 +159,7 @@ while((Get-Date) -lt $readyDeadline){
 }
 if(-not $ready){throw 'Services were started, but the backend did not report ready. Check the IntelliJ Run console or .local/logs/api.out.log.'}
 Write-Host 'DeskFlow is ready.'
-Write-Host 'App: http://127.0.0.1:5173 | Mail: http://127.0.0.1:8025'
+Write-Host "App: http://127.0.0.1:$FrontendPort | Mail: http://127.0.0.1:8025"
 Write-Host 'Local mode uses PostgreSQL polling; RabbitMQ transport is available through Compose.'
 if($apiInIdea){Write-Host 'Backend is managed by IntelliJ. Use its Run/Stop buttons for backend changes.'}
 Write-Host 'Stop with ./scripts/stop-local.ps1. Data is retained in .local/postgres.'
