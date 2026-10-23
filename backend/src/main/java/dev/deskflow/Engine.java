@@ -15,16 +15,27 @@ class Engine {
         if(claimed.isEmpty())return;
         var run=Store.clean(claimed.getFirst());UUID owner=(UUID)run.get("owner_id");
         try{
-            if (run.get("instance_id") instanceof UUID instanceId && store.instance(owner,instanceId).get("status").equals("STALE")) {
-                finish(id,lease,"FAILED","Inspect before resume: the instance lease expired or a project action failed");
+            boolean rootCancelled = store.db.queryForObject("select cancel_requested or status in ('FAILED','CANCELLED') from executions where id=? and owner_id=?",Boolean.class,run.get("root_id")==null?id:run.get("root_id"),owner);
+            if (Boolean.TRUE.equals(run.get("cancel_requested")) || rootCancelled) {
+                finish(id,lease,"CANCELLED",null);
                 return;
             }
-            if (run.get("instance_id") instanceof UUID instance && !store.claimInstance(owner,instance,id)) {
-                release(id,lease,"QUEUED",2);
-                return;
+            if (run.get("instance_id") instanceof UUID instanceId) {
+                var instance = store.instance(owner,instanceId);
+                if (instance.get("status").equals("STALE")) {
+                    finish(id,lease,"FAILED","Inspect before resume: the instance lease expired or a project action failed");
+                    return;
+                }
+                var project = store.project(owner,(UUID)instance.get("project_id"));
+                if (instance.get("status").equals("ARCHIVED") || Boolean.TRUE.equals(project.get("archived"))) {
+                    finish(id,lease,"FAILED","Restore the project and instance before running");
+                    return;
+                }
+                if (!store.claimInstance(owner,instanceId,id)) {
+                    release(id,lease,"QUEUED",2);
+                    return;
+                }
             }
-            boolean rootCancelled=store.db.queryForObject("select cancel_requested or status in ('FAILED','CANCELLED') from executions where id=?",Boolean.class,run.get("root_id")==null?id:run.get("root_id"));
-            if((boolean)run.get("cancel_requested")||rootCancelled){finish(id,lease,"CANCELLED",null);return;}
             var graph=new Graph((JsonNode)run.get("definition"));
             var stepRows=store.rows("select * from steps where execution_id=?",id);
             var steps=new LinkedHashMap<String,Map<String,Object>>();
