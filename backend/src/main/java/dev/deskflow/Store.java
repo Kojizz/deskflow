@@ -69,23 +69,28 @@ class Store {
         Json.bounded(input);
         if(Boolean.TRUE.equals(wf.get("archived")))throw new IllegalArgumentException("Unarchive this workflow before running it");
         if(dedupe!=null && (dedupe.isBlank() || dedupe.length()>200)) throw new IllegalArgumentException("Idempotency-Key must be 1–200 characters");
+        var graph = new Graph((JsonNode)wf.get("definition"));
+        Object selected = wf.get("_instance");
+        if (selected == null && graph.settings.hasNonNull("instanceId")) {
+            selected = UUID.fromString(graph.settings.path("instanceId").asText());
+        }
+        UUID selectedInstance = selected == null ? null : UUID.fromString(selected.toString());
+        UUID owner = (UUID)wf.get("owner_id");
         return tx.execute(s->{
+            db.queryForMap("select id from users where id=? for update", owner);
             UUID id=UUID.randomUUID();
             int count=db.update("insert into executions(id,workflow_id,owner_id,workflow_name,version,definition,input,trigger_type,dedupe_key) values(?,?,?,?,?,?::jsonb,?::jsonb,?,?) on conflict(workflow_id,dedupe_key) do nothing",id,wf.get("id"),wf.get("owner_id"),wf.get("name"),wf.get("version"),Json.write(wf.get("definition")),Json.write(input),type,dedupe);
             if(count==0) {
-                var existing=db.queryForMap("select id,input,trigger_type from executions where workflow_id=? and dedupe_key=?",wf.get("id"),dedupe);
-                if(!Json.read(existing.get("input").toString()).equals(input)||!type.equals(existing.get("trigger_type"))) throw new ResponseStatusException(HttpStatus.CONFLICT,"Idempotency-Key already used with a different payload or trigger");
+                var existing=db.queryForMap("select id,input,trigger_type,instance_id from executions where workflow_id=? and owner_id=? and dedupe_key=?",wf.get("id"),owner,dedupe);
+                if(!Json.read(existing.get("input").toString()).equals(input)||!type.equals(existing.get("trigger_type"))||!Objects.equals(selectedInstance,existing.get("instance_id"))) throw new ResponseStatusException(HttpStatus.CONFLICT,"Idempotency-Key already used with a different payload, trigger, or instance");
                 return (UUID)existing.get("id");
             }
-            var graph=new Graph((JsonNode)wf.get("definition"));
-            Object selected = wf.get("_instance");
-            if (selected == null && graph.settings.hasNonNull("instanceId")) {
-                selected = UUID.fromString(graph.settings.path("instanceId").asText());
-            }
-            if (selected != null) {
-                UUID instanceId = UUID.fromString(selected.toString());
-                UUID owner = (UUID)wf.get("owner_id");
+            if (selectedInstance != null) {
+                UUID instanceId = selectedInstance;
                 var instance = instance(owner,instanceId);
+                if (Boolean.TRUE.equals(project(owner,(UUID)instance.get("project_id")).get("archived"))) {
+                    throw new IllegalArgumentException("Project is archived");
+                }
                 if (!instance.get("status").equals("READY") && !(Boolean.TRUE.equals(wf.get("_inheritInstance")) && instance.get("status").equals("BUSY"))) {
                     throw new IllegalArgumentException("Instance is not ready");
                 }
@@ -110,10 +115,10 @@ class Store {
         return row;
     }
     Map<String,Object> project(UUID owner, UUID id) {
-        return clean(db.queryForMap("select * from projects where id=? and owner_id=?", id, owner));
+        return clean(db.queryForMap("select * from projects where id=? and owner_id=? and deleted_at is null", id, owner));
     }
     Map<String,Object> instance(UUID owner, UUID id) {
-        return clean(db.queryForMap("select * from project_instances where id=? and owner_id=?", id, owner));
+        return clean(db.queryForMap("select * from project_instances where id=? and owner_id=? and deleted_at is null", id, owner));
     }
     boolean claimInstance(UUID owner, UUID instance, UUID run) {
         return tx.execute(status -> {
