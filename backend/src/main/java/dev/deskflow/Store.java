@@ -86,7 +86,7 @@ class Store {
                 UUID instanceId = UUID.fromString(selected.toString());
                 UUID owner = (UUID)wf.get("owner_id");
                 var instance = instance(owner,instanceId);
-                if (!Set.of("READY", "BUSY").contains(instance.get("status"))) {
+                if (!instance.get("status").equals("READY") && !(Boolean.TRUE.equals(wf.get("_inheritInstance")) && instance.get("status").equals("BUSY"))) {
                     throw new IllegalArgumentException("Instance is not ready");
                 }
                 db.update("update executions set project_id=?,instance_id=?,state_fingerprint=? where id=? and owner_id=?",instance.get("project_id"),instanceId,projects.fingerprint(owner,instanceId),id,owner);
@@ -119,15 +119,16 @@ class Store {
         return tx.execute(status -> {
             db.queryForMap("select id from users where id=? for update",owner);
             UUID root = db.queryForObject("select coalesce(root_id,id) from executions where id=? and owner_id=?",UUID.class,run,owner);
-            int active = db.queryForObject("select count(*) from project_instances where owner_id=? and lease_token is not null and lease_token<>?",Integer.class,owner,root);
-            if (active >= projects.env.getProperty("app.projects.max-concurrent-runs",Integer.class,2)) { return false; }
+            int active = db.queryForObject("select count(distinct lease_token) from project_instances where owner_id=? and lease_token is not null and lease_token<>?",Integer.class,owner,root);
+            if (active >= projects.concurrentLimit()) { return false; }
             return db.update("update project_instances set lease_token=?,lease_until=now()+interval '90 seconds',status='BUSY' where id=? and owner_id=? and status in ('READY','BUSY') and (lease_token=? or lease_token is null) and not exists(select 1 from executions e where e.owner_id=? and e.instance_id=project_instances.id and e.id<>? and e.status='RUNNING' and e.lease_until>now())",root,instance,owner,root,owner,run) == 1;
         });
     }
     void releaseInstance(UUID owner, UUID instance, UUID run, boolean terminal) {
         UUID root = db.queryForObject("select coalesce(root_id,id) from executions where id=? and owner_id=?",UUID.class,run,owner);
-        if (terminal && root.equals(run)) {
-            db.update("update project_instances set lease_token=null,lease_until=null,status='READY' where id=? and owner_id=? and lease_token=?",instance,owner,root);
+        boolean done = Boolean.TRUE.equals(db.queryForObject("select status in ('SUCCEEDED','FAILED','CANCELLED') from executions where id=? and owner_id=?",Boolean.class,root,owner));
+        if (done) {
+            db.update("update project_instances set lease_token=null,lease_until=null,status=case when status='STALE' then 'STALE' else 'READY' end where owner_id=? and lease_token=? and not exists(select 1 from executions where owner_id=? and root_id=? and status='RUNNING')",owner,root,owner,root);
         }
     }
     String redact(UUID owner,String value) {
@@ -137,6 +138,10 @@ class Store {
             result=result.replace(secret,"[REDACTED]");
             String jsonEscaped=Json.write(secret); jsonEscaped=jsonEscaped.substring(1,jsonEscaped.length()-1);
             result=result.replace(jsonEscaped,"[REDACTED]");
+        }
+        for (String path : db.queryForList("select root_path from projects where owner_id=? union select workspace_path from project_instances where owner_id=?",String.class,owner,owner)) {
+            result = result.replace(Json.write(path).substring(1,Json.write(path).length()-1),"[PROJECT_PATH]");
+            result = result.replace(path,"[PROJECT_PATH]").replace(path.replace('\\','/'),"[PROJECT_PATH]");
         }
         return result;
     }
