@@ -1,16 +1,19 @@
 import type { Node, Edge } from '@xyflow/react';
-export type Kind = 'manual'|'webhook'|'schedule'|'form'|'transform'|'condition'|'filter'|'switch'|'merge'|'format'|'collection'|'delay'|'approval'|'subworkflow'|'loop'|'table'|'http'|'email'|'ai'|'fail';
+export type Kind = 'project.command'|'project.read'|'project.git'| 'manual'|'webhook'|'schedule'|'form'|'transform'|'condition'|'filter'|'switch'|'merge'|'format'|'collection'|'delay'|'approval'|'subworkflow'|'loop'|'table'|'http'|'email'|'ai'|'fail';
 export type StepData = {kind:Kind;label:string;config:Record<string,any>;[key:string]:unknown};
 export type FlowNode = Node<StepData,'step'>;
-export type Definition = {nodes:FlowNode[];edges:Edge[];settings?:{effectLimit?:number;allowedHosts?:string[]};metadata?:{folder?:string;tags?:string[]}};
+export type Definition = {nodes:FlowNode[];edges:Edge[];settings?:{effectLimit?:number;allowedHosts?:string[];instanceId?:string};metadata?:{folder?:string;tags?:string[]}};
 export type Workflow = {id:string;name:string;description:string;active:boolean;version:number;definition:Definition;webhook_token:string;updated_at:string;node_count?:number;last_status?:string;archived?:boolean};
-export type Execution = {id:string;workflow_id:string;workflow_name:string;version:number;status:string;trigger_type:string;created_at:string;started_at?:string;finished_at?:string;error?:string;cancel_requested?:boolean;input?:any;steps?:Step[];parent_id?:string;root_id?:string;effect_count?:number;effect_limit?:number;approvals?:Approval[];children?:any[];effects?:any[]};
+export type Execution = {instance_id?:string;state_fingerprint?:string;id:string;workflow_id:string;workflow_name:string;version:number;status:string;trigger_type:string;created_at:string;started_at?:string;finished_at?:string;error?:string;cancel_requested?:boolean;input?:any;steps?:Step[];parent_id?:string;root_id?:string;effect_count?:number;effect_limit?:number;approvals?:Approval[];children?:any[];effects?:any[]};
 export type Step = {node_id:string;label:string;type:string;status:string;attempts:number;output:any;error?:string;started_at?:string;finished_at?:string};
 export type Credential = {id:string;name:string;created_at:string};
 export type Approval = {id:string;execution_id:string;node_id:string;title:string;status:string;workflow_name?:string;created_at:string};
 export type DataTable = {id:string;name:string;record_count:number;created_at:string};
 export type User = {id:string;name:string;email:string};
 export const catalog:Record<Kind,{name:string;description:string;color:string;config:Record<string,any>}> = {
+ 'project.command':{name:'Project command',description:'Run approved argv inside an instance',color:'purple',config:{argv:['/absolute/path/to/executable','--version'],timeoutSeconds:30}},
+ 'project.read':{name:'Read project',description:'Read an instance file or directory',color:'blue',config:{path:'README.md'}},
+ 'project.git':{name:'Project Git',description:'Inspect or change the instance Git state',color:'green',config:{operation:'status'}},
  manual:{name:'Manual trigger',description:'Start with your own test data',color:'green',config:{}},
  webhook:{name:'Webhook',description:'Receive an event from another app',color:'green',config:{}},
  schedule:{name:'Schedule',description:'Run at a regular interval',color:'green',config:{intervalMinutes:60,input:{}}},

@@ -75,7 +75,7 @@ export function SignalArt({compact=false}:{compact?:boolean}){
  </div>;
 }
 
-type FooterDestination='overview'|'workflows'|'executions'|'credentials'|'integrations'|'tables'|'forms'|'approvals'|'impact';
+type FooterDestination='projects'|'overview'|'workflows'|'executions'|'credentials'|'integrations'|'tables'|'forms'|'approvals'|'impact';
 const footerGroups:{title:string;links:{label:string;view:FooterDestination}[]}[]=[
  {title:'Workspace',links:[{label:'Overview',view:'overview'},{label:'Workflows',view:'workflows'},{label:'Executions',view:'executions'},{label:'Forms',view:'forms'}]},
  {title:'Connections',links:[{label:'Integrations',view:'integrations'},{label:'Credentials',view:'credentials'},{label:'Data tables',view:'tables'}]},

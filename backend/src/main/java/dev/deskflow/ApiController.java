@@ -22,8 +22,10 @@ class ApiController {
     @PostMapping("/workflows/validate") Object validate(@RequestBody JsonNode body,HttpServletRequest r) {
         var g=new Graph(body);store.credentialRefs(owner(r),g);return Map.of("valid",true,"nodes",g.nodes.size());
     }
-    @PostMapping("/workflows/{id}/execute") Object run(@PathVariable UUID id,@RequestBody JsonNode body,@RequestHeader(value="Idempotency-Key",required=false) String key,HttpServletRequest r) {
-        return Map.of("id",store.enqueue(store.workflow(owner(r),id),body,"manual",key));
+    @PostMapping("/workflows/{id}/execute") Object run(@PathVariable UUID id,@RequestBody JsonNode body,@RequestHeader(value="Idempotency-Key",required=false) String key,@RequestParam(required=false) UUID instanceId,HttpServletRequest r) {
+        var workflow = new LinkedHashMap<>(store.workflow(owner(r),id));
+        if (instanceId != null) { workflow.put("_instance",instanceId); }
+        return Map.of("id",store.enqueue(workflow,body,"manual",key));
     }
     @GetMapping("/executions") Object executions(@RequestParam(required=false) UUID workflowId,@RequestParam(defaultValue="") String status,@RequestParam(defaultValue="") String search,@RequestParam(defaultValue="0") int offset,HttpServletRequest r) {
         if(workflowId!=null) store.workflow(owner(r),workflowId);
@@ -38,6 +40,7 @@ class ApiController {
     @PostMapping("/executions/{id}/replay") Object replay(@PathVariable UUID id,HttpServletRequest r) {
         var execution=Store.clean(store.db.queryForMap("select * from executions where id=? and owner_id=?",id,owner(r)));
         var wf=Json.map("id",execution.get("workflow_id"),"owner_id",owner(r),"name",execution.get("workflow_name"),"version",execution.get("version"),"definition",execution.get("definition"));
+        if (execution.get("instance_id") != null) { wf.put("_instance",execution.get("instance_id")); }
         return Map.of("id",store.enqueue(wf,(JsonNode)execution.get("input"),"replay",null));
     }
     @GetMapping("/credentials") Object credentials(HttpServletRequest r) { return store.rows("select id,name,created_at from credentials where owner_id=? order by created_at desc",owner(r)); }

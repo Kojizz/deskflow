@@ -51,13 +51,28 @@ class ImpactLab {
                             if(!items.isArray()||items.size()>20)throw new IllegalArgumentException("Preview loop needs at most 20 items");
                             int index=0;
                             for(var item:items){JsonNode childInput=node.kind().equals("loop")?Json.M.valueToTree(Json.map("item",item,"index",index,"source",input)):item;
-                                var childResult=walk(owner,(JsonNode)child.get("definition"),childInput,mocks,path+"["+index+"]/",depth+1,preview);
+                                var childDefinition = (com.fasterxml.jackson.databind.node.ObjectNode)((JsonNode)child.get("definition")).deepCopy();
+                                String inheritedInstance = c.path("instanceId").asText(definition.path("settings").path("instanceId").asText(""));
+                                if (!inheritedInstance.isBlank()) {
+                                    childDefinition.withObject("/settings").put("instanceId",inheritedInstance);
+                                }
+                                var childResult=walk(owner,childDefinition,childInput,mocks,path+"["+index+"]/",depth+1,preview);
                                 if(!childResult.get("status").equals("SUCCEEDED"))throw new IllegalArgumentException("Child preview incomplete: "+childResult.get("status"));
                                 results.add(Map.of("steps",childResult.get("outputs")));index++;
                             }
                             output=Json.M.valueToTree(Map.of("items",results,"count",results.size()));
                         }else{
-                            if(Set.of("http","ai").contains(node.kind())){
+                            if (node.kind().startsWith("project.")) {
+                                UUID instanceId = UUID.fromString(definition.path("settings").path("instanceId").asText());
+                                var instance = store.instance(owner,instanceId);
+                                preview.effects.add(Json.map("node",path,"kind",node.kind(),"instanceId",instanceId,"fingerprint",instance.get("state_fingerprint"),"argv",c.path("argv"),"operation",c.path("operation"),"path",c.path("path")));
+                                if (mock.isMissingNode()) {
+                                    state = "NEEDS_MOCK";
+                                    error = "Supply a project fixture; no project process or file read was performed";
+                                } else {
+                                    output = mock;
+                                }
+                            } else if(Set.of("http","ai").contains(node.kind())){
                                 var uri=java.net.URI.create(c.path("url").asText());
                                 if(!preview.allowedHosts.isEmpty()&&(uri.getHost()==null||!preview.allowedHosts.contains(uri.getHost().toLowerCase(Locale.ROOT))))throw new IllegalArgumentException("Destination is outside this workflow's allowed hosts");
                                 preview.effects.add(Json.map("node",path,"kind",node.kind(),"target",c.path("method").asText("POST")+" "+c.path("url").asText(),"body",c.path("body")));

@@ -14,9 +14,10 @@ import java.util.*;
 
 @Service
 class Actions {
+    final ProjectSteps projectSteps;
     final Store store;final JavaMailSender mail;final DataService data;final EffectGuard guard;
     final HttpClient client=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build();
-    Actions(Store store,JavaMailSender mail,DataService data,EffectGuard guard){this.store=store;this.mail=mail;this.data=data;this.guard=guard;}
+    Actions(Store store,JavaMailSender mail,DataService data,EffectGuard guard,ProjectSteps projectSteps){this.projectSteps=projectSteps;this.store=store;this.mail=mail;this.data=data;this.guard=guard;}
     static class Failure extends RuntimeException {
         final boolean retry;
         Failure(String message,boolean retry){super(message);this.retry=retry;}
@@ -24,6 +25,7 @@ class Actions {
     JsonNode execute(Graph.Node node,JsonNode context,UUID owner,UUID run){
         if(PureActions.supports(node.kind()))return PureActions.execute(node,context);
         return switch(node.kind()){
+            case "project.command", "project.read", "project.git" -> projectSteps.execute(node,context,owner,run);
             case "http" -> http(node,context,owner,run);
             case "email" -> {var c=Templates.render(node.config(),context);guard.reserve(run,node,"email:"+c.path("to").asText());yield email(c);}
             case "table" -> {
